@@ -30,6 +30,7 @@ HistVAE depends primarily on:
 - NumPy
 - pandas
 - PyYAML
+- matplotlib
 - tqdm
 
 Install PyTorch first if it is not already available in your environment.
@@ -42,18 +43,36 @@ pip install torch torchvision
 
 ## Quick Start
 
-Example usage from Python:
+Example usage from Python with the packaged default config:
 
 ```python
 from histvae import HistVAE
+from histvae.utils import load_config
 
-model = HistVAE()
+config, _ = load_config()
+model = HistVAE(config=config, exp_name="example")
 ```
 
-Command line usage:
+Example usage from Python with a user config that overrides the packaged default config:
+
+```python
+from histvae import HistVAE
+from histvae.utils import load_config
+
+config, _ = load_config("configs/pretrain.yaml")
+model = HistVAE(config=config, exp_name="example")
+```
+
+Command line usage with the packaged default config:
 
 ```bash
-histvae --config_path path/to/config.yaml --exp_name example --input_path path/to/input.csv
+histvae --exp_name example --input_path path/to/input.csv
+```
+
+Command line usage with a user config override:
+
+```bash
+histvae --config_path configs/pretrain.yaml --exp_name example --input_path path/to/input.csv
 ```
 
 ## Project Structure
@@ -92,7 +111,7 @@ This project is released under the MIT License.
 
 ## Author
 
-[Tadahaya Mizuno](https://github.com/tadahayamiz)  
+[Tadahaya Mizuno](https://github.com/tadahayamiz)
 
 ## Contact
 

@@ -6,17 +6,16 @@ main file
 
 @author: tadahaya
 """
+import argparse
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-import argparse
-from tqdm.auto import tqdm
 
-from .models import *
+from .data_handler import prep_data
+from .models import VitForClassification
 from .trainer import Trainer
-from .data_handler import prep_data, prep_test
-from .utils import load_yaml_config, get_default_config_path
+from .utils import load_config
 
 
 def get_args():
@@ -42,10 +41,14 @@ def main():
     if args.input_path is None:
         raise ValueError("!! Give input_path !!")
     # yamlの読み込み
-    config, resolved_config_path = load_yaml_config(args.config_path)
-    config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
-    config["config_path"] = resolved_config_path
-    config["exp_name"] = args.exp_name
+    config, config_meta = load_config(
+        config_path=args.config_path,
+        overrides={
+            "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "exp_name": args.exp_name,
+        },
+    )
+    config["config_path"] = config_meta["user_config_path"] or config_meta["default_config_path"]
     # dataの読み込み
     train_loader, test_loader, classes = prep_data(
         image_path=(args.input_path, args.input_path2), 

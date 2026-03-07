@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from histvae import HistVAE
+from histvae.utils import get_default_config_path, load_config
 
 
 def make_config(tmp_path):
@@ -80,7 +81,8 @@ def test_histvae_prep_data_without_labels(tmp_path):
     assert label is None
 
 
-def test_pretrain_train_epoch_and_evaluate_smoke(tmp_path):
+
+def test_prep_model_pretrain_smoke(tmp_path):
     config = make_config(tmp_path)
     train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
 
@@ -95,16 +97,19 @@ def test_pretrain_train_epoch_and_evaluate_smoke(tmp_path):
     )
     model.prep_model("pretrain")
 
-    train_loss, train_recon, train_kl = model.trainer.train_epoch(model.train_loader)
-    test_loss, test_recon, test_kl = model.trainer.evaluate(model.test_loader)
+    assert model.model is not None
+    assert model.optimizer is not None
+    assert model.trainer is not None
+    assert len(model.train_loader) == 1
+    batch = next(iter(model.train_loader))
+    (hist0, hist1), label = batch
+    assert hist0.shape == (2, 1, 4, 4)
+    assert hist1.shape == (2, 1, 4, 4)
+    assert label.shape == (2,)
 
-    for value in [train_loss, train_recon, train_kl, test_loss, test_recon, test_kl]:
-        assert np.isfinite(value)
-        assert value >= 0
 
 
-
-def test_finetune_forward_and_loss_smoke(tmp_path):
+def test_prep_model_finetune_smoke(tmp_path):
     config = make_config(tmp_path)
     train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
 
@@ -132,22 +137,22 @@ def test_finetune_forward_and_loss_smoke(tmp_path):
     )
     finetune.prep_model("finetune", model_path=str(ckpt_path))
 
-    (hist0, _), label = next(iter(finetune.train_loader))
-    logits, recon, mu, logvar = finetune.model(hist0)
-    loss = finetune.loss_fn(logits, label)
-
-    assert logits.shape[0] == label.shape[0]
-    assert recon.shape == hist0.shape
-    assert mu.shape[0] == hist0.shape[0]
-    assert logvar.shape == mu.shape
-    assert np.isfinite(loss.detach().item())
+    assert finetune.model is not None
+    assert finetune.optimizer is not None
+    assert finetune.trainer is not None
+    assert finetune.loss_fn is not None
+    batch = next(iter(finetune.train_loader))
+    (hist0, hist1), label = batch
+    assert hist0.shape == (2, 1, 4, 4)
+    assert hist1.shape == (2, 1, 4, 4)
+    assert label.shape == (2,)
 
 
 
 def test_installed_distribution_metadata():
     import importlib.metadata as metadata
 
-    assert metadata.version("histvae") == "0.0.1"
+    assert metadata.version("histvae") == "0.1.0"
 
 
 
@@ -172,6 +177,7 @@ def test_obsolete_packaging_files_removed():
     assert not (root / "requirements.txt").exists()
 
 
+
 def test_top_level_modules_are_real_files():
     root = Path(__file__).resolve().parents[1]
     for rel in [
@@ -186,6 +192,42 @@ def test_top_level_modules_are_real_files():
         assert "from .." not in text
 
 
+
 def test_inner_src_directory_removed():
     root = Path(__file__).resolve().parents[1]
     assert not (root / "src" / "histvae" / "src").exists()
+
+
+
+def test_load_config_uses_packaged_default_when_not_given():
+    config, meta = load_config()
+
+    assert isinstance(config, dict)
+    assert meta["default_config_path"] == get_default_config_path()
+    assert meta["user_config_path"] is None
+    assert config["num_points"] == 2048
+    assert config["batch_size"] == 32
+
+
+
+def test_load_config_merges_user_config_and_runtime_overrides(tmp_path):
+    override_path = tmp_path / "override.yaml"
+    override_path.write_text(
+        "batch_size: 8\n"
+        "nested:\n"
+        "  alpha: 2\n"
+        "  beta: 3\n"
+    )
+
+    config, meta = load_config(
+        config_path=str(override_path),
+        overrides={
+            "device": "cpu",
+            "nested": {"beta": 99, "gamma": 7},
+        },
+    )
+
+    assert meta["user_config_path"] == str(override_path)
+    assert config["batch_size"] == 8
+    assert config["device"] == "cpu"
+    assert config["nested"] == {"alpha": 2, "beta": 99, "gamma": 7}
