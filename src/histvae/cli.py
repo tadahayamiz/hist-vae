@@ -11,19 +11,18 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import argparse
-import yaml
-
 from tqdm.auto import tqdm
 
 from .models import *
 from .trainer import Trainer
 from .data_handler import prep_data, prep_test
+from .utils import load_yaml_config, get_default_config_path
 
 
 def get_args():
     """ 引数の取得 """
     parser = argparse.ArgumentParser(description="Yaml file for training")
-    parser.add_argument("--config_path", type=str, required=True, help="Yaml file for training")
+    parser.add_argument("--config_path", type=str, default=None, help="Yaml file for training (defaults to packaged config.yaml)")
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--input_path", type=str, default=None, help="input data path")
     parser.add_argument("--input_path2", type=str, default=None, help="input data path, test data")
@@ -43,10 +42,9 @@ def main():
     if args.input_path is None:
         raise ValueError("!! Give input_path !!")
     # yamlの読み込み
-    with open(args.config_path, "r") as f:
-        config = yaml.safe_load(f)
+    config, resolved_config_path = load_yaml_config(args.config_path)
     config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
-    config["config_path"] = args.config_path
+    config["config_path"] = resolved_config_path
     config["exp_name"] = args.exp_name
     # dataの読み込み
     train_loader, test_loader, classes = prep_data(

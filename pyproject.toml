@@ -4,16 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "histvae"
-version = "0.0.1"
+version = "0.1.0"
 description = "a package for extracting point cloud and histogram based representations"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "tadahaya" }
+  { name = "Tadahaya Mizuno", email = "your-email@example.com" }
 ]
 classifiers = [
   "Programming Language :: Python :: 3.10"
 ]
+
+
+license = { file = "LICENSE" }
+
+[project.urls]
+Homepage = "https://github.com/mizuno-group/hist-vae"
+Repository = "https://github.com/mizuno-group/hist-vae"
 
 [project.scripts]
 histvae = "histvae.cli:main"

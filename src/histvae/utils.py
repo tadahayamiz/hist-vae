@@ -8,6 +8,7 @@ utils
 """
 import json, os, time, yaml
 import random
+from importlib.resources import files
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -41,6 +42,22 @@ def fix_seed(seed: int=42, fix_cuda: bool=False):
     g = torch.Generator()
     g.manual_seed(seed)
     return g, seed_worker  # for worker_init_fn in DataLoader
+
+
+
+
+def get_default_config_path():
+    """Return the packaged default config.yaml path."""
+    return str(files("histvae").joinpath("config.yaml"))
+
+
+def load_yaml_config(config_path: str=None):
+    """Load a YAML config file. If not given, use the packaged default config."""
+    if config_path is None:
+        config_path = get_default_config_path()
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config, str(config_path)
 
 
 def save_experiment(config, model, optimizer, history, outdir, plot_progress=True):

@@ -16,7 +16,7 @@ This repository contains the reference implementation used in our research.
 Clone the repository and install it in editable mode:
 
 ```bash
-git clone https://github.com/<your-repo>/histvae.git
+git clone https://github.com/mizuno-group/hist-vae.git
 cd histvae
 pip install -e .
 ```
@@ -73,7 +73,6 @@ repo
 │     └─ utils.py
 │
 ├─ tests/
-├─ sample.ipynb
 ├─ pyproject.toml
 ├─ README.md
 └─ LICENSE
@@ -93,8 +92,7 @@ This project is released under the MIT License.
 
 ## Author
 
-Tadahaya Mizuno  
-University of Tokyo
+[Tadahaya Mizuno](https://github.com/tadahayamiz)  
 
 ## Contact
 
