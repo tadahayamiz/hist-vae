@@ -1,42 +1,112 @@
-# histvae
-a package for extracting point cloud and histogram based representations with VAE architecture.  
+# HistVAE
 
-# Note
-This repository is under construction and will be officially released by [Mizuno group](https://github.com/mizuno-group).  
-Please contact tadahaya[at]gmail.com before publishing your paper using the contents of this repository.  
+HistVAE is a Python package for learning latent representations from point-cloud or histogram-style data using a Variational Autoencoder (VAE).
 
-# route
-dev-route9: modify the histogram preparation method to the fixed range.  
+The package provides utilities for:
 
-## Organization
-------------  
+- histogram / point-cloud data preparation
+- VAE-based representation learning
+- pretraining and fine‑tuning workflows
+- command‑line execution for experiments
 
-    ├── LICENSE  
-    ├── README.md           <- The top-level README for developers using this project  
-    │  
-    ├── requirements.txt    <- The requirements file for reproducing the analysis environment, e.g.  
-    │                         generated with `pip freeze > requirements.txt`  
-    │  
-    ├── setup.py            <- makes project pip installable (pip install -e .) so src can be imported  
-    │  
-    ├── data                <- a sample data and config file  
-    │  
-    └── phtwins               <- Source code for use in this project  
-        ├── __init__.py     <- Makes src a Python module  
-        │  
-        ├── cli.py          <- main CLI for this module  
-        │  
-        ├── core.py         <- a Python module  
-        │  
-        └── src             <- src for this module  
+This repository contains the reference implementation used in our research.
 
-------------
+---
 
-## Authors
-- [Tadahaya Mizuno](https://github.com/tadahayamiz)  
-    - correspondence  
+## Installation
+
+Clone the repository and install it in editable mode:
+
+```bash
+git clone https://github.com/<your-repo>/histvae.git
+cd histvae
+pip install -e .
+```
+
+---
+
+## Dependencies
+
+HistVAE depends primarily on:
+
+- Python ≥ 3.8
+- PyTorch
+- NumPy
+- pandas
+- PyYAML
+
+Install PyTorch first if it is not already available in your environment.
+
+Example:
+
+```bash
+pip install torch torchvision
+```
+
+---
+
+## Quick Start
+
+Example usage from Python:
+
+```python
+from histvae import HistVAE
+
+model = HistVAE()
+```
+
+Command line usage:
+
+```bash
+histvae --config config.yaml
+```
+
+---
+
+## Project Structure
+
+```
+repo
+│
+├─ src/
+│   └─ histvae/
+│
+├─ tests/
+│
+├─ sample.ipynb
+│
+├─ pyproject.toml
+├─ README.md
+└─ LICENSE
+```
+
+---
+
+## Testing
+
+Run tests with:
+
+```bash
+pytest
+```
+
+---
+
+## License
+
+This project is released under the MIT License.
+
+---
+
+## Author
+
+Tadahaya Mizuno  
+University of Tokyo
+
+---
 
 ## Contact
-If you have any questions or comments, please feel free to create an issue on github here, or email us:  
-- tadahaya[at]gmail.com  
-    - lead contact  
+
+For questions or collaboration inquiries:
+
+tadahaya[at]gmail.com
