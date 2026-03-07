@@ -170,3 +170,10 @@ def test_obsolete_packaging_files_removed():
     assert not (root / "setup.py").exists()
     assert not (root / "MANIFEST.in").exists()
     assert not (root / "requirements.txt").exists()
+
+
+def test_bridge_imports():
+    import histvae.models
+    import histvae.trainer
+    import histvae.data_handler
+    import histvae.utils

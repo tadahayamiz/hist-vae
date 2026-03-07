@@ -15,9 +15,9 @@ import yaml
 
 from tqdm.auto import tqdm
 
-from .src.models import *
-from .src.trainer import Trainer
-from .src.data_handler import prep_data, prep_test
+from .models import *
+from .trainer import Trainer
+from .data_handler import prep_data, prep_test
 
 
 def get_args():

@@ -27,10 +27,10 @@ import os, yaml
 from matplotlib import pyplot as plt
 from datetime import datetime
 
-from .src.models import ModelHandler
-from .src.trainer import PreTrainer, FineTuner
-from .src.data_handler import DataHandler, plot_hist
-from .src.utils import fix_seed
+from .models import ModelHandler
+from .trainer import PreTrainer, FineTuner
+from .data_handler import DataHandler, plot_hist
+from .utils import fix_seed
 
 class HistVAE:
     def __init__(
