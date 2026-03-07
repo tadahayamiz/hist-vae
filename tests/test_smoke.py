@@ -172,8 +172,27 @@ def test_obsolete_packaging_files_removed():
     assert not (root / "requirements.txt").exists()
 
 
-def test_bridge_imports():
+def test_top_level_modules_are_real_files():
+    root = Path(__file__).resolve().parents[1]
+    for rel in [
+        "src/histvae/models.py",
+        "src/histvae/trainer.py",
+        "src/histvae/data_handler.py",
+        "src/histvae/utils.py",
+    ]:
+        path = root / rel
+        assert path.exists()
+        text = path.read_text()
+        assert "from .." not in text
+
+
+def test_inner_src_shims_import():
     import histvae.models
     import histvae.trainer
     import histvae.data_handler
     import histvae.utils
+
+    from histvae.src.models import ModelHandler as InnerModelHandler
+    from histvae.models import ModelHandler as TopModelHandler
+
+    assert InnerModelHandler is TopModelHandler
