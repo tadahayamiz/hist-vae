@@ -35,6 +35,8 @@ HistVAE depends primarily on:
 
 PyTorch is intentionally not installed automatically by `pip install histvae` because the appropriate build depends on your CPU/CUDA environment. Install a suitable PyTorch build first, then install HistVAE.
 
+The optional `schedulefree` package is not required. If it is installed, HistVAE uses `schedulefree.RAdamScheduleFree`. Otherwise it falls back to `torch.optim.RAdam` with a small compatibility wrapper.
+
 Example:
 
 ```bash
@@ -42,6 +44,8 @@ pip install torch torchvision
 ```
 
 ## Quick Start
+
+The primary Python API is the `HistVAE` class. The CLI is a thin convenience wrapper around the same training workflow.
 
 Example usage from Python with the packaged default config:
 

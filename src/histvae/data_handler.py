@@ -90,7 +90,7 @@ class Histogram:
         return self.hist_func(data)
 
 
-def plot_hist(hist_list, output="", **plot_params):
+def plot_hist(hist_list, output="", show: bool=False, **plot_params):
     """
     Plot histograms (1D, 2D).
 
@@ -152,7 +152,8 @@ def plot_hist(hist_list, output="", **plot_params):
     plt.tight_layout()
     if output:
         plt.savefig(output)
-    plt.show()
+    if show:
+        plt.show()
     plt.close()
 
 

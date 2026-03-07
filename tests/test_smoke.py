@@ -157,6 +157,45 @@ def test_prep_model_finetune_smoke(tmp_path):
 
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(not RUN_SLOW, reason="Set RUN_SLOW_HISTVAE_TESTS=1 to run prediction-path tests.")
+def test_predict_requires_finetune_and_returns_arrays(tmp_path):
+    config = make_config(tmp_path)
+    train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
+
+    pretrain = HistVAE(config=copy.deepcopy(config), outdir=str(tmp_path), exp_name="toy-pretrain-predict")
+    pretrain.prep_data(
+        train_data=train_data,
+        train_group=train_group,
+        train_label=train_label,
+        test_data=test_data,
+        test_group=test_group,
+        test_label=test_label,
+    )
+    pretrain.prep_model("pretrain")
+    with pytest.raises(RuntimeError):
+        pretrain.predict(pretrain.train_loader)
+
+    ckpt_path = Path(tmp_path) / "predict_state.pt"
+    torch.save(pretrain.model.state_dict(), ckpt_path)
+
+    finetune = HistVAE(config=copy.deepcopy(config), outdir=str(tmp_path), exp_name="toy-finetune-predict")
+    finetune.prep_data(
+        train_data=train_data,
+        train_group=train_group,
+        train_label=train_label,
+        test_data=test_data,
+        test_group=test_group,
+        test_label=test_label,
+    )
+    finetune.prep_model("finetune", model_path=str(ckpt_path))
+
+    preds, probs, labels = finetune.predict(finetune.test_loader)
+    assert preds.shape == (2,)
+    assert probs.shape == (2, 2)
+    assert labels.shape == (2,)
+
+
 @pytest.mark.smoke
 def test_installed_distribution_metadata():
     import importlib.metadata as metadata
