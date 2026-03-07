@@ -186,13 +186,6 @@ def test_top_level_modules_are_real_files():
         assert "from .." not in text
 
 
-def test_inner_src_shims_import():
-    import histvae.models
-    import histvae.trainer
-    import histvae.data_handler
-    import histvae.utils
-
-    from histvae.src.models import ModelHandler as InnerModelHandler
-    from histvae.models import ModelHandler as TopModelHandler
-
-    assert InnerModelHandler is TopModelHandler
+def test_inner_src_directory_removed():
+    root = Path(__file__).resolve().parents[1]
+    assert not (root / "src" / "histvae" / "src").exists()
