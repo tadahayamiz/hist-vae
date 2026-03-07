@@ -40,3 +40,10 @@ include = ["histvae*"]
 
 [tool.setuptools.package-data]
 histvae = ["config.yaml"]
+
+
+[tool.pytest.ini_options]
+markers = [
+  "smoke: lightweight tests that should run in regular CI",
+  "slow: heavier end-to-end tests including actual pretrain/finetune runs",
+]

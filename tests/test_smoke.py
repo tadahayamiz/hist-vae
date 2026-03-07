@@ -1,12 +1,15 @@
+import os
 from pathlib import Path
 import copy
 
 import numpy as np
+import pytest
 import torch
 
 from histvae import HistVAE
 from histvae.utils import get_default_config_path, load_config
 
+RUN_SLOW = os.environ.get("RUN_SLOW_HISTVAE_TESTS") == "1"
 
 def make_config(tmp_path):
     return {
@@ -61,6 +64,7 @@ def make_toy_data(with_labels=False):
     return train_data, train_group, test_data, test_group, train_label, test_label
 
 
+@pytest.mark.smoke
 def test_histvae_prep_data_without_labels(tmp_path):
     config = make_config(tmp_path)
     train_data, train_group, test_data, test_group, _, _ = make_toy_data(with_labels=False)
@@ -82,6 +86,8 @@ def test_histvae_prep_data_without_labels(tmp_path):
 
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(not RUN_SLOW, reason="Set RUN_SLOW_HISTVAE_TESTS=1 to run model-preparation and end-to-end training tests.")
 def test_prep_model_pretrain_smoke(tmp_path):
     config = make_config(tmp_path)
     train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
@@ -109,6 +115,8 @@ def test_prep_model_pretrain_smoke(tmp_path):
 
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(not RUN_SLOW, reason="Set RUN_SLOW_HISTVAE_TESTS=1 to run model-preparation and end-to-end training tests.")
 def test_prep_model_finetune_smoke(tmp_path):
     config = make_config(tmp_path)
     train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
@@ -149,6 +157,7 @@ def test_prep_model_finetune_smoke(tmp_path):
 
 
 
+@pytest.mark.smoke
 def test_installed_distribution_metadata():
     import importlib.metadata as metadata
 
@@ -156,6 +165,7 @@ def test_installed_distribution_metadata():
 
 
 
+@pytest.mark.smoke
 def test_src_layout_is_active_package():
     import histvae
 
@@ -169,6 +179,7 @@ def test_src_layout_is_active_package():
 
 
 
+@pytest.mark.smoke
 def test_obsolete_packaging_files_removed():
     root = Path(__file__).resolve().parents[1]
 
@@ -178,6 +189,7 @@ def test_obsolete_packaging_files_removed():
 
 
 
+@pytest.mark.smoke
 def test_top_level_modules_are_real_files():
     root = Path(__file__).resolve().parents[1]
     for rel in [
@@ -193,12 +205,14 @@ def test_top_level_modules_are_real_files():
 
 
 
+@pytest.mark.smoke
 def test_inner_src_directory_removed():
     root = Path(__file__).resolve().parents[1]
     assert not (root / "src" / "histvae" / "src").exists()
 
 
 
+@pytest.mark.smoke
 def test_load_config_uses_packaged_default_when_not_given():
     config, meta = load_config()
 
@@ -210,6 +224,7 @@ def test_load_config_uses_packaged_default_when_not_given():
 
 
 
+@pytest.mark.smoke
 def test_load_config_merges_user_config_and_runtime_overrides(tmp_path):
     override_path = tmp_path / "override.yaml"
     override_path.write_text(
@@ -231,3 +246,68 @@ def test_load_config_merges_user_config_and_runtime_overrides(tmp_path):
     assert config["batch_size"] == 8
     assert config["device"] == "cpu"
     assert config["nested"] == {"alpha": 2, "beta": 99, "gamma": 7}
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not RUN_SLOW, reason="Set RUN_SLOW_HISTVAE_TESTS=1 to run end-to-end pretrain/finetune tests.")
+def test_pretrain_train_end_to_end_toy(tmp_path):
+    config = make_config(tmp_path)
+    train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
+
+    model = HistVAE(config=copy.deepcopy(config), outdir=str(tmp_path), exp_name="toy-pretrain-e2e")
+    model.prep_data(
+        train_data=train_data,
+        train_group=train_group,
+        train_label=train_label,
+        test_data=test_data,
+        test_group=test_group,
+        test_label=test_label,
+    )
+    model.prep_model("pretrain")
+    model.train(verbose=False)
+
+    resdir = Path(tmp_path) / "toy-pretrain-e2e"
+    assert (resdir / "config.yaml").exists()
+    assert (resdir / "history.json").exists()
+    assert (resdir / "model_best.pt").exists()
+    assert (resdir / "progress_loss.tif").exists()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not RUN_SLOW, reason="Set RUN_SLOW_HISTVAE_TESTS=1 to run end-to-end pretrain/finetune tests.")
+def test_finetune_train_end_to_end_toy(tmp_path):
+    config = make_config(tmp_path)
+    train_data, train_group, test_data, test_group, train_label, test_label = make_toy_data(with_labels=True)
+
+    pretrain = HistVAE(config=copy.deepcopy(config), outdir=str(tmp_path), exp_name="toy-pretrain-for-finetune")
+    pretrain.prep_data(
+        train_data=train_data,
+        train_group=train_group,
+        train_label=train_label,
+        test_data=test_data,
+        test_group=test_group,
+        test_label=test_label,
+    )
+    pretrain.prep_model("pretrain")
+    pretrain.train(verbose=False)
+
+    ckpt_path = Path(tmp_path) / "toy-pretrain-for-finetune" / "model_best.pt"
+    assert ckpt_path.exists()
+
+    finetune = HistVAE(config=copy.deepcopy(config), outdir=str(tmp_path), exp_name="toy-finetune-e2e")
+    finetune.prep_data(
+        train_data=train_data,
+        train_group=train_group,
+        train_label=train_label,
+        test_data=test_data,
+        test_group=test_group,
+        test_label=test_label,
+    )
+    finetune.prep_model("finetune", model_path=str(ckpt_path))
+    finetune.train(verbose=False)
+
+    resdir = Path(tmp_path) / "toy-finetune-e2e"
+    assert (resdir / "config.yaml").exists()
+    assert (resdir / "history.json").exists()
+    assert (resdir / "model_best.pt").exists()
+    assert (resdir / "progress_loss.tif").exists()
