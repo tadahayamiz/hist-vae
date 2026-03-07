@@ -1,0 +1,38 @@
+# config file (yaml)
+# === I/O ===
+device: null
+exp_name: null
+# === Data ===
+num_points: 2048
+in_channels: 1
+in_dims: 2
+max_vals: [10000, 10000]
+bins: 64
+num_workers: 4
+pin_memory: True
+# === Conv VAE ===
+latent_dim: 128
+hidden_dims: [32, 64, 128, 256]
+dropout_conv: 0.3
+beta: 1.0
+# === Linear head ===
+# latent_dim: 128
+num_classes: 2
+num_layers: 2
+hidden_head: 512
+dropout_head: 0.3
+frozen: True
+use_pretrain_loss: False
+# === Training ===
+batch_size: 32
+epochs: 200
+lr: 0.01
+weight_decay: 0.0
+transform: True
+accum_grad: 1
+clip_grad: 1.0
+save_model_every: 10
+patience: 10
+early_stop_mode: 'min'
+# === Logging ===
+log_every: 2

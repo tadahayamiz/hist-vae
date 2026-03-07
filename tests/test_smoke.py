@@ -1,3 +1,6 @@
+import filecmp
+from pathlib import Path
+
 import numpy as np
 
 from histvae import HistVAE
@@ -96,8 +99,29 @@ def test_histvae_pretrain_setup_smoke(tmp_path):
     assert (labels == -1).all()
 
 
-
 def test_installed_distribution_metadata():
     import importlib.metadata as metadata
 
     assert metadata.version("histvae") == "0.0.1"
+
+
+def test_src_layout_mirror_exists_and_matches_root():
+    root = Path(__file__).resolve().parents[1]
+    root_pkg = root / "histvae"
+    src_pkg = root / "src" / "histvae"
+
+    assert src_pkg.exists()
+    expected = [
+        "__init__.py",
+        "cli.py",
+        "config.yaml",
+        "core.py",
+        "src/__init__.py",
+        "src/data_handler.py",
+        "src/models.py",
+        "src/trainer.py",
+        "src/utils.py",
+    ]
+    for rel in expected:
+        assert (src_pkg / rel).exists()
+        assert filecmp.cmp(root_pkg / rel, src_pkg / rel, shallow=False)
