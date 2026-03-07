@@ -1,1 +1,1 @@
-recursive-include histvae *.yaml
+include src/histvae/config.yaml

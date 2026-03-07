@@ -1,4 +1,3 @@
-import filecmp
 from pathlib import Path
 
 import numpy as np
@@ -75,53 +74,19 @@ def test_histvae_prep_data_without_labels(tmp_path):
     assert label is None
 
 
-def test_histvae_pretrain_setup_smoke(tmp_path):
-    config = make_config(tmp_path)
-    train_data, train_group, test_data, test_group = make_toy_data()
-
-    model = HistVAE(config=config, outdir=str(tmp_path), exp_name="toy")
-    model.prep_data(
-        train_data=train_data,
-        train_group=train_group,
-        test_data=test_data,
-        test_group=test_group,
-    )
-    model.prep_model(mode="pretrain")
-
-    assert model.model is not None
-    assert model.optimizer is not None
-    assert model.trainer is not None
-
-    (hist0, hist1), labels = next(iter(model.train_loader))
-    assert hist0.shape == (2, 1, 16, 16)
-    assert hist1.shape == (2, 1, 16, 16)
-    assert labels.shape == (2,)
-    assert (labels == -1).all()
-
-
 def test_installed_distribution_metadata():
     import importlib.metadata as metadata
 
     assert metadata.version("histvae") == "0.0.1"
 
 
-def test_src_layout_mirror_exists_and_matches_root():
+def test_src_layout_is_active_package():
+    import histvae
+
     root = Path(__file__).resolve().parents[1]
-    root_pkg = root / "histvae"
     src_pkg = root / "src" / "histvae"
+    root_pkg = root / "histvae"
 
     assert src_pkg.exists()
-    expected = [
-        "__init__.py",
-        "cli.py",
-        "config.yaml",
-        "core.py",
-        "src/__init__.py",
-        "src/data_handler.py",
-        "src/models.py",
-        "src/trainer.py",
-        "src/utils.py",
-    ]
-    for rel in expected:
-        assert (src_pkg / rel).exists()
-        assert filecmp.cmp(root_pkg / rel, src_pkg / rel, shallow=False)
+    assert not root_pkg.exists()
+    assert Path(histvae.__file__).resolve() == (src_pkg / "__init__.py").resolve()

@@ -10,7 +10,8 @@ setup(
     version="0.0.1",
     description="a package for extracting point cloud and histogram based representations",
     author="tadahaya",
-    packages=find_packages(),
+    package_dir={"": "src"},
+    packages=find_packages(where="src"),
     install_requires=install_requirements,
     include_package_data=True, # necessary for including data indicated in MANIFEST.in
     entry_points={
