@@ -1,1 +1,1 @@
-recursive-include mymodule/data *
+recursive-include histvae *.yaml

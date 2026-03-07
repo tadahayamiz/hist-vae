@@ -94,3 +94,10 @@ def test_histvae_pretrain_setup_smoke(tmp_path):
     assert hist1.shape == (2, 1, 16, 16)
     assert labels.shape == (2,)
     assert (labels == -1).all()
+
+
+
+def test_installed_distribution_metadata():
+    import importlib.metadata as metadata
+
+    assert metadata.version("histvae") == "0.0.1"
