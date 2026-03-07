@@ -9,14 +9,12 @@ main file
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.transforms as transforms
 import numpy as np
 import argparse
 import yaml
 
 from tqdm.auto import tqdm
 
-from .src.arguments import get_args
 from .src.models import *
 from .src.trainer import Trainer
 from .src.data_handler import prep_data, prep_test
