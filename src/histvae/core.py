@@ -10,17 +10,6 @@ a class specific to the model
 import torch
 import torch.nn as nn
 import torch.optim as optim
-try:
-    from schedulefree import RAdamScheduleFree
-except ImportError:  # pragma: no cover - optional dependency fallback
-    class RAdamScheduleFree(optim.RAdam):
-        """Compatibility fallback when schedulefree is unavailable."""
-
-        def train(self):
-            return self
-
-        def eval(self):
-            return self
 import numpy as np
 import pandas as pd
 import os, yaml
@@ -29,8 +18,48 @@ from datetime import datetime
 
 from .models import ModelHandler
 from .trainer import PreTrainer, FineTuner
-from .data_handler import DataHandler, plot_hist, validate_histogram_mode
+from .data_handler import (
+    DataHandler,
+    plot_hist,
+    validate_histogram_mode,
+    validate_out_of_range_policy,
+    validate_sampling_mode,
+    validate_value_transform,
+)
 from .utils import fix_seed
+
+
+OPTIMIZERS = ("radam_schedule_free", "radam")
+
+
+def validate_optimizer(optimizer_name):
+    if optimizer_name not in OPTIMIZERS:
+        raise ValueError(
+            f"Unsupported optimizer: {optimizer_name!r}. "
+            "Use 'radam_schedule_free' or 'radam'."
+        )
+    return optimizer_name
+
+
+def make_optimizer(parameters, config):
+    optimizer_name = validate_optimizer(
+        config.get("optimizer", "radam_schedule_free")
+    )
+    kwargs = {
+        "lr": float(config["lr"]),
+        "betas": (0.9, 0.999),
+        "weight_decay": float(config["weight_decay"]),
+    }
+    if optimizer_name == "radam":
+        return optim.RAdam(parameters, **kwargs)
+    try:
+        from schedulefree import RAdamScheduleFree
+    except ImportError as exc:
+        raise ImportError(
+            "optimizer='radam_schedule_free' requires the 'schedulefree' "
+            "package. Install it or set optimizer='radam'."
+        ) from exc
+    return RAdamScheduleFree(parameters, **kwargs)
 
 class HistVAE:
     def __init__(
@@ -41,6 +70,21 @@ class HistVAE:
         self.config = config
         self.config["histogram_mode"] = validate_histogram_mode(
             self.config.get("histogram_mode", "count")
+            )
+        self.config["out_of_range_policy"] = validate_out_of_range_policy(
+            self.config.get("out_of_range_policy", "drop")
+            )
+        self.config["value_transform"] = validate_value_transform(
+            self.config.get("value_transform", "none")
+            )
+        self.config["train_sampling_mode"] = validate_sampling_mode(
+            self.config.get("train_sampling_mode", "random")
+            )
+        self.config["eval_sampling_mode"] = validate_sampling_mode(
+            self.config.get("eval_sampling_mode", "full")
+            )
+        self.config["optimizer"] = validate_optimizer(
+            self.config.get("optimizer", "radam_schedule_free")
             )
         self.outdir = outdir
         self.exp_name = exp_name
@@ -68,13 +112,15 @@ class HistVAE:
             exp_name = f"exp-{datetime.today().strftime('%y%m%d')}"
         self.config["exp_name"] = exp_name
         tmp = [self.config["in_channels"]] + [self.config["bins"]] * (self.config["in_dims"])
-        self.config["input_shape"] = tuple(tmp) # hard coded for ConvVAE
+        self.config["input_shape"] = tmp # hard coded for ConvVAE
 
 
     def prep_data(
             self, train_data=None, train_group=None, train_label=None, train_transform=None,
             test_data=None, test_group=None, test_label=None, test_transform=None,
-            histogram_mode=None
+            histogram_mode=None, out_of_range_policy=None,
+            value_transform=None, train_sampling_mode=None,
+            test_sampling_mode=None
             ):
         """Prepare grouped point data as histograms.
 
@@ -83,26 +129,61 @@ class HistVAE:
         histogram_mode: str, optional
             Runtime override for the configured histogram representation.
             Use ``"count"`` for the original count/intensity behavior or
-            ``"density"`` to normalize each histogram to unit integral.
+            ``"density"`` to normalize each histogram to unit integral, or
+            ``"probability_mass"`` for bounded bin probabilities.
+
+        out_of_range_policy: str, optional
+            Runtime override for ``"drop"``, ``"clip"``, or ``"error"``.
+
+        value_transform: str, optional
+            Runtime override for linear (``"none"``) or log1p-spaced bins.
         """
         if histogram_mode is not None:
             self.config["histogram_mode"] = validate_histogram_mode(histogram_mode)
+        if out_of_range_policy is not None:
+            self.config["out_of_range_policy"] = validate_out_of_range_policy(
+                out_of_range_policy
+            )
+        if value_transform is not None:
+            self.config["value_transform"] = validate_value_transform(
+                value_transform
+            )
         if train_transform is None:
             train_transform = self.config.get("transform", True)
         if test_transform is None:
             test_transform = False
+        if train_sampling_mode is None:
+            train_sampling_mode = self.config["train_sampling_mode"]
+        else:
+            train_sampling_mode = validate_sampling_mode(train_sampling_mode)
+            self.config["train_sampling_mode"] = train_sampling_mode
+        if test_sampling_mode is None:
+            test_sampling_mode = self.config["eval_sampling_mode"]
+        else:
+            test_sampling_mode = validate_sampling_mode(test_sampling_mode)
+            self.config["eval_sampling_mode"] = test_sampling_mode
         # dataset
         self.train_dataset = self.data_handler.make_dataset(
-            data=train_data, group=train_group, label=train_label, transform=train_transform
+            data=train_data, group=train_group, label=train_label,
+            transform=train_transform, sampling_mode=train_sampling_mode
             )
         if test_data is not None:
             self.test_dataset = self.data_handler.make_dataset(
-                data=test_data, group=test_group, label=test_label, transform=test_transform
+                data=test_data, group=test_group, label=test_label,
+                transform=test_transform, sampling_mode=test_sampling_mode
                 )
         # dataloader
-        self.train_loader = self.data_handler.make_dataloader(dataset=self.train_dataset, mode="train")
+        self.train_loader = self.data_handler.make_dataloader(
+            dataset=self.train_dataset, mode="train",
+            generator=self._seed["generator"],
+            worker_init_fn=self._seed["worker_init_fn"],
+            )
         if self.test_dataset is not None:
-            self.test_loader = self.data_handler.make_dataloader(dataset=self.test_dataset, mode="test")
+            self.test_loader = self.data_handler.make_dataloader(
+                dataset=self.test_dataset, mode="test",
+                generator=self._seed["generator"],
+                worker_init_fn=self._seed["worker_init_fn"],
+                )
         # lookup table
         self.train_lut = self.data_handler.make_lut(dataset=self.train_dataset)
         self.test_lut = None
@@ -130,10 +211,7 @@ class HistVAE:
         if mode == "pretrain":
             # prepare pretraining model
             self.model = self.model_handler.make_pretrain()
-            self.optimizer = RAdamScheduleFree(
-                self.model.parameters(), lr=float(self.config["lr"]), betas=(0.9, 0.999),
-                weight_decay=float(self.config["weight_decay"])
-                )
+            self.optimizer = make_optimizer(self.model.parameters(), self.config)
             self.trainer = PreTrainer(
                 self.config, self.model, self.optimizer, outdir=self.outdir
                 )
@@ -141,10 +219,7 @@ class HistVAE:
             # prepare continuous pretraining model
             assert model_path is not None, "!! model_path must be given in cpt mode!!"
             self.model = self.model_handler.make_cpt(model_path=model_path)
-            self.optimizer = RAdamScheduleFree(
-                self.model.parameters(), lr=float(self.config["lr"]), betas=(0.9, 0.999),
-                weight_decay=float(self.config["weight_decay"])
-                )
+            self.optimizer = make_optimizer(self.model.parameters(), self.config)
             self.trainer = PreTrainer(
                 self.config, self.model, self.optimizer, outdir=self.outdir
                 )
@@ -152,10 +227,7 @@ class HistVAE:
             # prepare finetuning model
             assert model_path is not None, "!! model_path must be given in finetune mode!!"
             self.model = self.model_handler.make_finetune(model_path=model_path)
-            self.optimizer = RAdamScheduleFree(
-                self.model.parameters(), lr=float(self.config["lr"]), betas=(0.9, 0.999),
-                weight_decay=float(self.config["weight_decay"])
-                )
+            self.optimizer = make_optimizer(self.model.parameters(), self.config)
             self.loss_fn = nn.CrossEntropyLoss()
             self.trainer = FineTuner(
                 self.config, self.model, self.optimizer, self.loss_fn, outdir=self.outdir
@@ -198,14 +270,16 @@ class HistVAE:
             for data, label in data_loader:
                 hist0, hist1 = (x.to(self.device) for x in data)
                 label = label.to(self.device)
-                logits, recon, mu, logvar = self.model(hist0) # use original hist
+                logits, recon, mu, logvar = self.model(
+                    hist0, sample_latent=False
+                    ) # use original hist
                 preds.append(logits.argmax(dim=1).cpu().numpy())
                 probs.append(logits.cpu().numpy())
                 labels.append(label.cpu().numpy())
         return np.concatenate(preds), np.concatenate(probs), np.concatenate(labels)
 
 
-    def get_latent(self, dataset=None, indices:list=[]):
+    def get_latent(self, dataset=None, indices=None):
         """
         get latent representation
         note: pretrained model weight is changed after finetuning.
@@ -216,15 +290,13 @@ class HistVAE:
         if self.model is None:
             raise ValueError("!! fit or load_model first !!")
         self.model.eval()
-        dataset.transform_off() # disable transform
         num_data = len(dataset)
-        if len(indices) == 0:
+        if indices is None or len(indices) == 0:
             indices = list(range(num_data))
         reps = []
         with torch.no_grad():
             for i in indices:
-                data, _ = dataset[i]
-                hist0, hist1 = (x.to(self.device).unsqueeze(0) for x in data)  # add batch dimension
+                hist0 = dataset.get_full_histogram(i).to(self.device).unsqueeze(0)
                 mu, logvar = self.model.encode(hist0) # use original hist
                 # note both ConvVAE and LinearHead have encode method
                 reps.append(mu.cpu().numpy().reshape(1, -1))  # del batch dimension
@@ -261,9 +333,8 @@ class HistVAE:
             }
         
         """
-        # restore original histogram
-        hist_list = [dataset[i][0][0].numpy()[0] * dataset.log1p_max[i] for i in indices] # ((hist, hist), label)
-        hist_list = [np.exp(h) - 1 for h in hist_list]
+        # plot the deterministic model-input histogram
+        hist_list = [dataset.get_full_histogram(i).numpy()[0] for i in indices]
         plot_hist(hist_list, output, **plot_params)
 
 
@@ -405,7 +476,7 @@ class Preprocess:
 
     def check_transform(
             self, raw_data, group, indices:list=[], num_points:int=4096, bins:int=64,
-            histogram_mode="count", **plot_params
+            histogram_mode="count", value_transform="none", **plot_params
             ):
         """
         check transform
@@ -429,7 +500,8 @@ class Preprocess:
             # converted data
             hist = self.to_hist(
                 raw_data, group, idx, num_points=num_points, bins=bins,
-                histogram_mode=histogram_mode
+                histogram_mode=histogram_mode,
+                value_transform=value_transform,
                 )
             # summary
             list_raw.append(raw)
@@ -442,7 +514,7 @@ class Preprocess:
 
     def to_hist(
             self, raw_data, group, idx:int, num_points:int=4096, bins=64,
-            histogram_mode="count"
+            histogram_mode="count", value_transform="none"
             ):
         """
         convert to histogram
@@ -458,8 +530,11 @@ class Preprocess:
             pointcloud0 = pointcloud[idxs0, :]
         # prepare histogram
         hist0 = calc_hist(
-            pointcloud0, bins=bins, histogram_mode=histogram_mode
+            pointcloud0, bins=bins, histogram_mode=histogram_mode,
+            value_transform=value_transform,
             )
+        if histogram_mode == "probability_mass":
+            return hist0
         # normalize the histogram
         hist0 = np.log1p(hist0) # log1p for numerical stability
         tmp = np.max(hist0) # store the max value for normalization
@@ -467,23 +542,35 @@ class Preprocess:
         return hist0
 
 
-def calc_hist(X, bins=16, histogram_mode="count"):
-    density = validate_histogram_mode(histogram_mode) == "density"
+def calc_hist(X, bins=16, histogram_mode="count", value_transform="none"):
+    histogram_mode = validate_histogram_mode(histogram_mode)
+    value_transform = validate_value_transform(value_transform)
+    values = np.asarray(X)
+    if value_transform == "log1p":
+        if np.any(~np.isfinite(values)) or np.any(values < 0):
+            raise ValueError("value_transform='log1p' requires finite non-negative data.")
+        values = np.log1p(values)
+    density = histogram_mode == "density"
     with np.errstate(divide="ignore", invalid="ignore"):
         try:
-            s = X.shape[1]
+            s = values.shape[1]
         except IndexError:
             s = 1
         if s == 1:
-            hist, _ = np.histogram(X, bins=bins, density=density)
+            hist, _ = np.histogram(values, bins=bins, density=density)
         elif s == 2:
             hist, _, _ = np.histogram2d(
-                X[:, 0], X[:, 1], bins=bins, density=density
+                values[:, 0], values[:, 1], bins=bins, density=density
                 )
         elif s == 3:
-            hist, _ = np.histogramdd(X, bins=bins, density=density)
+            hist, _ = np.histogramdd(values, bins=bins, density=density)
         else:
             raise ValueError("!! Input array must be 1D, 2D, or 3D. !!")
+    if histogram_mode == "probability_mass":
+        total = hist.sum()
+        if total <= 0:
+            raise ValueError("Probability-mass histogram is undefined for empty input data.")
+        hist = hist.astype(np.float64, copy=False) / total
     if density and not np.all(np.isfinite(hist)):
         raise ValueError("Density histogram is undefined for empty input data.")
     return hist

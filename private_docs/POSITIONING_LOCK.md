@@ -1,14 +1,17 @@
 # Positioning Lock
 
-Updated: 2026-06-19
+Updated: 2026-06-20
 
-HistVAE supports alternative histogram representations; it does not assume that
-one representation is universally superior.
+HistVAE supports selectable histogram representations; it does not assume one
+representation is universally superior.
 
-- `count` is the backward-compatible representation and may be appropriate when
-  group-size/count intensity is meaningful.
-- `density` is appropriate when the distributional shape should be emphasized
-  independently of group size.
-- The current change establishes selectable mechanics and technical validity.
-- No model-performance or biological claim is made by this implementation-only
-  update.
+- `count` is the backward-compatible representation when count intensity is
+  meaningful.
+- `density` remains available for unit-integral density followed by the legacy
+  log/max normalization.
+- `probability_mass` is a bounded group-size-invariant representation aligned
+  with the current sigmoid decoder.
+- Deterministic validation and canonical best-checkpoint handling are
+  reliability requirements, not evidence of biological validity.
+- Current attached-data runs establish technical execution only. Model quality
+  and biological claims require controlled pilot and downstream evaluation.

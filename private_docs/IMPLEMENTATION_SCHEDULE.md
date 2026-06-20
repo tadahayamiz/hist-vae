@@ -1,36 +1,46 @@
 # Implementation Schedule
 
-Updated: 2026-06-19
+Updated: 2026-06-20
 
 ## Done
 
-- Inspected repository structure; no prior `private_docs/` existed.
-- Identified the active histogram path in `src/histvae/data_handler.py`.
-- Added strict `count` / `density` histogram selection.
-- Kept `count` as the default for existing experiments.
-- Added `HistVAE.prep_data(..., histogram_mode=...)` runtime selection.
-- Added 1D density tests and actual-data smoke validation.
-- Updated public usage documentation.
-- Added the standard `private_docs/` working record.
+- Added strict `count` / `density` histogram selection while preserving the
+  original count default.
+- Added bounded `probability_mass` histograms for sigmoid-decoder pretraining.
+- Added explicit `drop` / `clip` / `error` range handling and optional log1p bin
+  geometry.
+- Made validation use full-group histograms and deterministic latent means.
+- Made `get_latent()` deterministic and independent of sampled dataset views.
+- Added configurable pretraining checkpoint monitoring and active-latent
+  diagnostics.
+- Made `model_best.pt` canonical and added `model_last.pt`.
+- Made saved YAML safe-loadable and checkpoint metadata explicit.
+- Wired `dropout_conv` through encoder and decoder blocks.
+- Replaced optimizer auto-fallback with strict optimizer selection.
+- Added focused reliability tests and attached-data smoke validation.
 
 ## Verification
 
-- `pytest -q tests/test_histogram_modes.py`: 8 passed
-- `pytest -m smoke -q`: 16 passed, 5 deselected
-- `RUN_SLOW_HISTVAE_TESTS=0 pytest -q`: 16 passed, 5 skipped
-- `RUN_SLOW_HISTVAE_TESTS=1 pytest -m slow -q`: 5 passed, 16 deselected
-- Attached CSV smoke: 519,118 rows, 134 groups, finite 1D density input and
-  reconstruction with shape `(8, 1, 64)`
+- Related tests: 17 passed
+- Smoke tests: 25 passed, 5 deselected
+- Full pytest with slow tests enabled: 30 passed
+- Attached CSV reliability smoke: 519,118 rows; 94 train and 20 validation
+  groups; probability-mass inputs finite, bounded, and sum to one; repeated
+  validation metrics exactly equal; one-epoch training and safe artifact reload
+  completed.
 
 ## Next
 
-- Create a dataset-specific analysis config and sample-level train/test policy.
-- Compare density and count modes under the same split and seeds.
+- Run a three-seed pilot using smaller latent/hidden dimensions.
+- Compare linear and log1p bins plus robust training-only range choices.
+- Compare beta values and inspect reconstruction, KL, active latent dimensions,
+  and downstream sample-level separation.
 
 ## Deferred
 
 - CLI repair or redesign
-- General preprocessing refactor
+- Broad preprocessing refactor
+- Full production pretraining before pilot selection
 
 ## Temporary shims
 

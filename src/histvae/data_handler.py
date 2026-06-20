@@ -16,16 +16,46 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 # functions
-HISTOGRAM_MODES = ("count", "density")
+HISTOGRAM_MODES = ("count", "density", "probability_mass")
+OUT_OF_RANGE_POLICIES = ("drop", "clip", "error")
+VALUE_TRANSFORMS = ("none", "log1p")
+SAMPLING_MODES = ("random", "full")
 
 
 def validate_histogram_mode(histogram_mode):
     if histogram_mode not in HISTOGRAM_MODES:
         raise ValueError(
             f"Unsupported histogram_mode: {histogram_mode!r}. "
-            "Use 'count' or 'density'."
+            "Use 'count', 'density', or 'probability_mass'."
         )
     return histogram_mode
+
+
+def validate_out_of_range_policy(out_of_range_policy):
+    if out_of_range_policy not in OUT_OF_RANGE_POLICIES:
+        raise ValueError(
+            f"Unsupported out_of_range_policy: {out_of_range_policy!r}. "
+            "Use 'drop', 'clip', or 'error'."
+        )
+    return out_of_range_policy
+
+
+def validate_value_transform(value_transform):
+    if value_transform not in VALUE_TRANSFORMS:
+        raise ValueError(
+            f"Unsupported value_transform: {value_transform!r}. "
+            "Use 'none' or 'log1p'."
+        )
+    return value_transform
+
+
+def validate_sampling_mode(sampling_mode):
+    if sampling_mode not in SAMPLING_MODES:
+        raise ValueError(
+            f"Unsupported sampling_mode: {sampling_mode!r}. "
+            "Use 'random' or 'full'."
+        )
+    return sampling_mode
 
 
 class Histogram:
@@ -33,7 +63,10 @@ class Histogram:
     A class optimized to compute histograms efficiently without repeated dimension checks.
     """
 
-    def __init__(self, dimension, max_vals, bins_per_dim, histogram_mode="count"):
+    def __init__(
+            self, dimension, max_vals, bins_per_dim, histogram_mode="count",
+            out_of_range_policy="drop", value_transform="none"
+            ):
         """
         Initialize the Histogram object with the optimal histogram function based on dimension.
 
@@ -51,11 +84,34 @@ class Histogram:
         histogram_mode : str
             ``"count"`` keeps raw bin counts. ``"density"`` returns a
             probability density whose integral over the histogram range is 1.
+            ``"probability_mass"`` returns non-negative bin probabilities
+            whose sum is 1.
+
+        out_of_range_policy : str
+            ``"drop"`` preserves the legacy behavior. ``"clip"`` maps
+            underflow and overflow values to the edge bins. ``"error"``
+            rejects data outside the configured range.
+
+        value_transform : str
+            ``"none"`` uses linear-width bins. ``"log1p"`` applies log1p to
+            both values and configured maxima before histogram construction.
         """
         self.dimension = dimension
-        self.max_vals = np.asarray(max_vals)
+        self.raw_max_vals = np.asarray(max_vals, dtype=np.float64)
+        if self.raw_max_vals.shape != (dimension,):
+            raise ValueError("max_vals must contain one value per dimension.")
+        if not np.all(np.isfinite(self.raw_max_vals)) or np.any(self.raw_max_vals <= 0):
+            raise ValueError("max_vals must contain finite positive values.")
         self.histogram_mode = validate_histogram_mode(histogram_mode)
         self.density = self.histogram_mode == "density"
+        self.probability_mass = self.histogram_mode == "probability_mass"
+        self.out_of_range_policy = validate_out_of_range_policy(out_of_range_policy)
+        self.value_transform = validate_value_transform(value_transform)
+
+        if self.value_transform == "log1p":
+            self.max_vals = np.log1p(self.raw_max_vals)
+        else:
+            self.max_vals = self.raw_max_vals.copy()
 
         if isinstance(bins_per_dim, int):
             bins_per_dim = [bins_per_dim] * dimension
@@ -92,6 +148,42 @@ class Histogram:
         hist, _ = np.histogramdd(data, bins=self.edges, density=self.density)
         return hist
 
+    def _prepare_data(self, data):
+        values = np.asarray(data, dtype=np.float64)
+        if self.dimension == 1:
+            values = values.reshape(-1, 1)
+        elif values.ndim != 2 or values.shape[1] != self.dimension:
+            raise ValueError(
+                f"Expected data with shape (n_samples, {self.dimension}), "
+                f"got {values.shape}."
+            )
+
+        finite_rows = np.all(np.isfinite(values), axis=1)
+        in_range_rows = np.all(
+            (values >= 0) & (values <= self.raw_max_vals), axis=1
+        )
+        valid_rows = finite_rows & in_range_rows
+
+        if self.out_of_range_policy == "error" and not np.all(valid_rows):
+            invalid_count = int((~valid_rows).sum())
+            raise ValueError(
+                f"Found {invalid_count} observations outside the finite "
+                "configured histogram range."
+            )
+        if self.out_of_range_policy == "clip":
+            if not np.all(finite_rows):
+                raise ValueError("Cannot clip NaN or infinite histogram values.")
+            values = np.clip(values, 0, self.raw_max_vals)
+        elif self.out_of_range_policy == "drop":
+            values = values[valid_rows]
+
+        if self.value_transform == "log1p":
+            values = np.log1p(values)
+
+        if self.dimension == 1:
+            return values[:, 0]
+        return values
+
     def compute(self, data):
         """
         Compute histogram using the pre-selected histogram function.
@@ -106,13 +198,24 @@ class Histogram:
         hist : np.ndarray
             Computed histogram.
         """
+        prepared_data = self._prepare_data(data)
         with np.errstate(divide="ignore", invalid="ignore"):
-            hist = self.hist_func(data)
+            hist = self.hist_func(prepared_data)
+        if self.probability_mass:
+            total = hist.sum()
+            if total <= 0:
+                raise ValueError(
+                    "Probability-mass histogram is undefined because no "
+                    "observations remain in the configured range."
+                )
+            hist = hist.astype(np.float64, copy=False) / total
         if self.density and not np.all(np.isfinite(hist)):
             raise ValueError(
                 "Density histogram is undefined for the configured range. "
                 "Ensure max_vals includes at least one observation in every group."
             )
+        if not np.all(np.isfinite(hist)):
+            raise ValueError("Histogram contains non-finite values.")
         return hist
 
 
@@ -187,7 +290,8 @@ class PointHistDataset(Dataset):
     def __init__(
             self, data, group, label=None, max_vals=(), transform=False,
             num_points=768, bins=64, transform_params=None,
-            histogram_mode="count"
+            histogram_mode="count", out_of_range_policy="drop",
+            value_transform="none", sampling_mode="random"
             ):
         """
         Parameters
@@ -217,6 +321,12 @@ class PointHistDataset(Dataset):
             ``"count"`` preserves the original count-based representation.
             ``"density"`` removes group-size intensity by normalizing each
             histogram to unit integral before the existing log/max scaling.
+            ``"probability_mass"`` returns bounded bin probabilities and does
+            not apply the legacy log/max scaling.
+
+        sampling_mode: str
+            ``"random"`` draws two point subsets for training. ``"full"``
+            deterministically uses all points in the group for both views.
         
         """
         super().__init__()
@@ -233,6 +343,9 @@ class PointHistDataset(Dataset):
         self.ndim = data.shape[1]
         self.max_vals = max_vals
         self.histogram_mode = validate_histogram_mode(histogram_mode)
+        self.sampling_mode = validate_sampling_mode(sampling_mode)
+        if self.sampling_mode == "full" and transform:
+            raise ValueError("sampling_mode='full' requires transform=False.")
         # tie the group to the data
         self.unique_groups = np.unique(group)
         self.idx2group = {i: j for i, j in enumerate(self.unique_groups)} # map index in the dataset to the group
@@ -249,19 +362,23 @@ class PointHistDataset(Dataset):
             self._transform_fxn = lambda x: x
         # prepare histogram
         self.hist = Histogram(
-            self.ndim, max_vals, bins, histogram_mode=self.histogram_mode
+            self.ndim, max_vals, bins,
+            histogram_mode=self.histogram_mode,
+            out_of_range_policy=out_of_range_policy,
+            value_transform=value_transform,
         )
         # store normalization parameters
         # note: Dataset cannnot modify the data, so we need to store the normalization parameters
         self.log1p_max = dict()
-        for i in range(self.num_data):
-            group_idx = self.idx2group[i]
-            selected_indices = np.where(self.group == group_idx)[0]
-            pointcloud = self.data[selected_indices]
-            hist = self._calc_hist(pointcloud)
-            hist = np.log1p(hist)
-            tmp = np.max(hist) # store the max value for normalization
-            self.log1p_max[group_idx] = tmp
+        if self.histogram_mode != "probability_mass":
+            for i in range(self.num_data):
+                group_idx = self.idx2group[i]
+                selected_indices = np.where(self.group == group_idx)[0]
+                pointcloud = self.data[selected_indices]
+                hist = self._calc_hist(pointcloud)
+                hist = np.log1p(hist)
+                tmp = np.max(hist) # store the max value for normalization
+                self.log1p_max[group_idx] = tmp
 
 
     def __len__(self):
@@ -273,25 +390,25 @@ class PointHistDataset(Dataset):
         group_idx = self.idx2group[idx]
         selected_indices = np.where(self.group == group_idx)[0]
         pointcloud = self.data[selected_indices]
-        # limit the number of points if necessary (random sampling)
-        if pointcloud.shape[0] > self.num_points:
-            idxs0 = np.random.choice(pointcloud.shape[0], self.num_points, replace=False)
-            pointcloud0 = pointcloud[idxs0, :]
-            idxs1 = np.random.choice(pointcloud.shape[0], self.num_points, replace=False)
-            pointcloud1 = pointcloud[idxs1, :]
+        if self.sampling_mode == "full":
+            hist0 = self._normalize_hist(self._calc_hist(pointcloud), group_idx)
+            hist1 = hist0.clone()
         else:
-            idxs0 = np.random.choice(pointcloud.shape[0], self.num_points, replace=True)
+            # limit the number of points if necessary (random sampling)
+            replace = pointcloud.shape[0] <= self.num_points
+            idxs0 = np.random.choice(
+                pointcloud.shape[0], self.num_points, replace=replace
+            )
             pointcloud0 = pointcloud[idxs0, :]
-            idxs1 = np.random.choice(pointcloud.shape[0], self.num_points, replace=True)
+            idxs1 = np.random.choice(
+                pointcloud.shape[0], self.num_points, replace=replace
+            )
             pointcloud1 = pointcloud[idxs1, :]
-        # prepare histogram
-        hist0 = self._calc_hist(pointcloud0)
-        hist1 = self._calc_hist(pointcloud1)
-        # normalize the histogram
-        hist0 = self._normalize_hist(hist0, group_idx)
-        hist1 = self._normalize_hist(hist1, group_idx)
-        # transform
-        hist1 = self._transform_fxn(hist1) # hist1 only like translation
+            # prepare and normalize histograms
+            hist0 = self._normalize_hist(self._calc_hist(pointcloud0), group_idx)
+            hist1 = self._normalize_hist(self._calc_hist(pointcloud1), group_idx)
+            # transform
+            hist1 = self._transform_fxn(hist1) # hist1 only like translation
         # add channel dimension
         hist0 = hist0.unsqueeze(0)
         hist1 = hist1.unsqueeze(0)
@@ -304,6 +421,14 @@ class PointHistDataset(Dataset):
         # return the data
         return (hist0, hist1), label
         # hist0, original; hist1, noisy
+
+
+    def get_full_histogram(self, idx):
+        """Return a deterministic, unaugmented histogram for one group."""
+        group_idx = self.idx2group[idx]
+        selected_indices = np.where(self.group == group_idx)[0]
+        hist = self._calc_hist(self.data[selected_indices])
+        return self._normalize_hist(hist, group_idx).unsqueeze(0)
 
 
     def _calc_hist(self, data):
@@ -330,6 +455,8 @@ class PointHistDataset(Dataset):
         Normalize the histogram.
         
         """
+        if self.histogram_mode == "probability_mass":
+            return torch.tensor(hist, dtype=torch.float32)
         hist = np.log1p(hist)
         max_val = self.log1p_max[group_idx]
         hist = hist / (max_val + 1e-6)
@@ -436,7 +563,10 @@ class DataHandler:
         self.config = config
 
 
-    def make_dataset(self, data, group, label=None, transform=False):
+    def make_dataset(
+            self, data, group, label=None, transform=False,
+            sampling_mode="random"
+            ):
         """
         make dataset for training and testing
 
@@ -457,12 +587,16 @@ class DataHandler:
             ds_args["label"] = label
         if transform is not None:
             ds_args["transform"] = transform
+        ds_args["sampling_mode"] = sampling_mode
         # create dataset
         dataset = PointHistDataset(**ds_args)
         return dataset
 
 
-    def make_dataloader(self, dataset, mode="train"):
+    def make_dataloader(
+            self, dataset, mode="train", generator=None,
+            worker_init_fn=None
+            ):
         """
         prepare train and test loader
         
@@ -486,6 +620,8 @@ class DataHandler:
         # integrate arguments
         dl_args["dataset"] = dataset
         dl_args["shuffle"] = shuffle
+        dl_args["generator"] = generator
+        dl_args["worker_init_fn"] = worker_init_fn
         loader = PointHistDataLoader(**dl_args)
         return loader
     

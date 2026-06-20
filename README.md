@@ -32,10 +32,9 @@ HistVAE depends primarily on:
 - PyYAML
 - matplotlib
 - tqdm
+- schedulefree
 
-PyTorch is intentionally not installed automatically by `pip install histvae` because the appropriate build depends on your CPU/CUDA environment. Install a suitable PyTorch build first, then install HistVAE.
-
-The optional `schedulefree` package is not required. If it is installed, HistVAE uses `schedulefree.RAdamScheduleFree`. Otherwise it falls back to `torch.optim.RAdam` with a small compatibility wrapper.
+PyTorch is intentionally not installed directly by HistVAE because the appropriate build depends on your CPU/CUDA environment. Install a suitable PyTorch build first, then install HistVAE. The packaged configuration explicitly uses `schedulefree.RAdamScheduleFree`; set `optimizer: radam` to use `torch.optim.RAdam` instead. HistVAE does not silently switch optimizers.
 
 Example:
 
@@ -75,14 +74,15 @@ packaged default config < user config file < CLI/runtime overrides
 
 This means `src/histvae/config.yaml` provides the baseline defaults, an optional external YAML overrides those defaults, and runtime values such as `exp_name` and `device` are applied last.
 
-### Count and density histograms
+### Histogram representation
 
 Histogram construction can preserve the original bin-count representation or
-remove group-size intensity by using a probability density:
+remove group-size intensity with either a density or bounded probability mass:
 
 ```yaml
-histogram_mode: count    # original behavior; default
-# histogram_mode: density  # unit-integral histogram
+histogram_mode: count  # original behavior; default
+# histogram_mode: density  # unit-integral density + legacy log/max scaling
+# histogram_mode: probability_mass  # bin probabilities in [0, 1], sum to 1
 ```
 
 The mode can also be overridden when preparing data. For one-dimensional
@@ -96,19 +96,30 @@ group = df["sample_name"].to_numpy()
 config["in_dims"] = 1
 config["max_vals"] = [350000]
 
-model = HistVAE(config=config, exp_name="fitc-density")
+config["value_transform"] = "log1p"
+config["out_of_range_policy"] = "clip"
+
+model = HistVAE(config=config, exp_name="fitc-probability")
 model.prep_data(
     train_data=data,
     train_group=group,
-    histogram_mode="density",
+    histogram_mode="probability_mass",
 )
 ```
 
-`density` normalizes the histogram to unit integral before the existing
-`log1p` and per-sample max scaling. `count` remains the default so existing
-experiments retain their previous representation. Values outside the fixed
-range defined by `max_vals` are excluded, so the range should be determined
-from the training domain and recorded with the experiment.
+`count` and `density` retain their legacy log/max normalization. The recommended
+bounded representation for a sigmoid decoder is `probability_mass`, which
+normalizes in-range bin counts to sum to one without the legacy scaling.
+`value_transform: log1p` creates log-spaced bins while keeping `max_vals` in the
+original data units. `out_of_range_policy: clip` collects underflow and overflow
+in the edge bins instead of silently dropping them; `drop` preserves the prior
+behavior and `error` rejects them.
+
+By default, training uses two random point subsets per group, while validation
+uses the full group and `z = mu`, making repeated validation and latent
+extraction deterministic. Pretraining checkpoints are selected by
+`pretrain_monitor` (`test_recon` in the packaged config). `model_best.pt`
+contains the monitored best epoch and `model_last.pt` preserves the final epoch.
 
 Command line usage with the packaged default config:
 

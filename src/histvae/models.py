@@ -103,12 +103,15 @@ class ResidualConvTransposeBlock(nn.Module):
 
 # VAE Encoder to latent space (encoding)
 class Encoder(nn.Module):
-    def __init__(self, in_channels, hidden_dims, dim):
+    def __init__(self, in_channels, hidden_dims, dim, dropout_conv=0.3):
         super().__init__()
         layers = []
         for h_dim in hidden_dims:
             layers.append(
-                ResidualConvBlock(in_channels, h_dim, kernel_size=3, stride=2, padding=1, dim=dim)
+                ResidualConvBlock(
+                    in_channels, h_dim, kernel_size=3, stride=2, padding=1,
+                    dim=dim, dropout_conv=dropout_conv
+                )
             )
             in_channels = h_dim
         self.encoder = nn.Sequential(*layers)
@@ -118,19 +121,24 @@ class Encoder(nn.Module):
 
 # VAE Decoder to reconstruct the input (decoding)
 class Decoder(nn.Module):
-    def __init__(self, out_channels, hidden_dims, dim):
+    def __init__(self, out_channels, hidden_dims, dim, dropout_conv=0.3):
         super().__init__()
         hidden_dims = hidden_dims[::-1]
         layers = []
         in_channels = hidden_dims[0]
         for h_dim in hidden_dims[1:]:
             layers.append(
-                ResidualConvTransposeBlock(in_channels, h_dim, kernel_size=4, stride=2, padding=1, dim=dim)
+                ResidualConvTransposeBlock(
+                    in_channels, h_dim, kernel_size=4, stride=2, padding=1,
+                    dim=dim, dropout_conv=dropout_conv
+                )
             )
             in_channels = h_dim
         layers.append(
             ResidualConvTransposeBlock(
-                in_channels, out_channels, kernel_size=4, stride=2, padding=1, activation="sigmoid", dim=dim
+                in_channels, out_channels, kernel_size=4, stride=2,
+                padding=1, activation="sigmoid", dim=dim,
+                dropout_conv=dropout_conv
                 )
             # histogram data is normalized to [0, 1]
         )
@@ -141,7 +149,10 @@ class Decoder(nn.Module):
 
 # main ConvVAE class
 class ConvVAE(nn.Module):
-    def __init__(self, input_shape=None, latent_dim=128, hidden_dims=None):
+    def __init__(
+            self, input_shape=None, latent_dim=128, hidden_dims=None,
+            dropout_conv=0.3
+            ):
         """
         Variational Autoencoder (VAE) for 1D, 2D, and 3D data.
 
@@ -163,7 +174,10 @@ class ConvVAE(nn.Module):
         self.dim = DataDim(len(input_shape) - 1)
         hidden_dims = hidden_dims or [32, 64, 128, 256]
         # Construct Encoder
-        self.encoder = Encoder(input_shape[0], hidden_dims, dim=self.dim)
+        self.encoder = Encoder(
+            input_shape[0], hidden_dims, dim=self.dim,
+            dropout_conv=dropout_conv
+        )
         # calculate the output shape of the encoder
         with torch.no_grad():
             sample_input = torch.zeros(1, *input_shape)
@@ -178,7 +192,10 @@ class ConvVAE(nn.Module):
         nn.init.xavier_uniform_(self.fc_decode.weight)
         nn.init.zeros_(self.fc_decode.bias)
         # Construct Decoder
-        self.decoder = Decoder(input_shape[0], hidden_dims, dim=self.dim)
+        self.decoder = Decoder(
+            input_shape[0], hidden_dims, dim=self.dim,
+            dropout_conv=dropout_conv
+        )
 
     def encode(self, x):
         enc_out = self.encoder(x).flatten(start_dim=1)
@@ -195,9 +212,9 @@ class ConvVAE(nn.Module):
         dec_input = self.fc_decode(z).view(-1, *self.enc_out_shape)
         return self.decoder(dec_input)
 
-    def forward(self, x):
+    def forward(self, x, sample_latent=True):
         mu, logvar = self.encode(x)
-        z = self.reparameterize(mu, logvar)
+        z = self.reparameterize(mu, logvar) if sample_latent else mu
         recon = self.decode(z)
         return recon, mu, logvar
 
@@ -276,9 +293,9 @@ class LinearHead(nn.Module):
         self.linear_head = nn.Sequential(*layers)
 
 
-    def forward(self, x):
+    def forward(self, x, sample_latent=True):
         mu, logvar = self.pretrained.encode(x)
-        z = self.pretrained.reparameterize(mu, logvar)
+        z = self.pretrained.reparameterize(mu, logvar) if sample_latent else mu
         recon = self.pretrained.decode(z)
         logits = self.linear_head(mu)  # use the latent representation for classification
         return logits, recon, mu, logvar

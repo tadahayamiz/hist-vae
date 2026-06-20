@@ -44,6 +44,26 @@ def test_density_mode_removes_replication_intensity():
 
 
 @pytest.mark.smoke
+def test_probability_mass_is_bounded_and_replication_invariant():
+    data = np.array([[0.1], [0.2], [0.6], [0.9]], dtype=np.float32)
+    repeated = np.repeat(data, repeats=5, axis=0)
+    histogram = Histogram(
+        dimension=1,
+        max_vals=[1.0],
+        bins_per_dim=2,
+        histogram_mode="probability_mass",
+    )
+
+    mass = histogram.compute(data)
+
+    np.testing.assert_allclose(mass, [0.5, 0.5])
+    np.testing.assert_allclose(histogram.compute(repeated), mass)
+    assert mass.min() >= 0
+    assert mass.max() <= 1
+    np.testing.assert_allclose(mass.sum(), 1.0)
+
+
+@pytest.mark.smoke
 def test_density_mode_removes_group_size_from_dataset_normalization():
     base = np.array([[0.1], [0.2], [0.6], [0.9]], dtype=np.float32)
     data = np.vstack([base, np.tile(base, (5, 1))])
@@ -74,6 +94,30 @@ def test_density_mode_removes_group_size_from_dataset_normalization():
 
 
 @pytest.mark.smoke
+def test_probability_mass_dataset_views_stay_in_decoder_range():
+    data = np.array(
+        [[0.05], [0.1], [0.2], [0.3], [0.6], [0.7], [0.8], [0.9]],
+        dtype=np.float32,
+    )
+    group = np.array(["sample"] * len(data))
+    dataset = PointHistDataset(
+        data=data,
+        group=group,
+        max_vals=[1.0],
+        num_points=4,
+        bins=4,
+        histogram_mode="probability_mass",
+    )
+
+    for _ in range(10):
+        (hist0, hist1), _ = dataset[0]
+        for hist in (hist0, hist1):
+            assert float(hist.min()) >= 0
+            assert float(hist.max()) <= 1
+            torch.testing.assert_close(hist.sum(), torch.tensor(1.0))
+
+
+@pytest.mark.smoke
 def test_invalid_histogram_mode_is_rejected():
     with pytest.raises(ValueError, match="Unsupported histogram_mode"):
         Histogram(
@@ -95,6 +139,57 @@ def test_density_mode_rejects_a_range_with_no_observations():
 
     with pytest.raises(ValueError, match="configured range"):
         hist.compute(np.array([[2.0], [3.0]], dtype=np.float32))
+
+
+@pytest.mark.smoke
+def test_out_of_range_policy_is_explicit():
+    data = np.array([[-1.0], [0.25], [2.0]], dtype=np.float32)
+    dropped = Histogram(
+        dimension=1,
+        max_vals=[1.0],
+        bins_per_dim=2,
+        histogram_mode="probability_mass",
+        out_of_range_policy="drop",
+    ).compute(data)
+    clipped = Histogram(
+        dimension=1,
+        max_vals=[1.0],
+        bins_per_dim=2,
+        histogram_mode="probability_mass",
+        out_of_range_policy="clip",
+    ).compute(data)
+
+    np.testing.assert_allclose(dropped, [1.0, 0.0])
+    np.testing.assert_allclose(clipped, [2 / 3, 1 / 3])
+    with pytest.raises(ValueError, match="outside"):
+        Histogram(
+            dimension=1,
+            max_vals=[1.0],
+            bins_per_dim=2,
+            out_of_range_policy="error",
+        ).compute(data)
+
+
+@pytest.mark.smoke
+def test_log1p_value_transform_changes_bin_geometry():
+    data = np.array([[0.0], [1.0], [10.0], [100.0]], dtype=np.float32)
+    linear = Histogram(
+        dimension=1,
+        max_vals=[100.0],
+        bins_per_dim=2,
+        histogram_mode="count",
+        value_transform="none",
+    ).compute(data)
+    logspaced = Histogram(
+        dimension=1,
+        max_vals=[100.0],
+        bins_per_dim=2,
+        histogram_mode="count",
+        value_transform="log1p",
+    ).compute(data)
+
+    np.testing.assert_array_equal(linear, [3, 1])
+    np.testing.assert_array_equal(logspaced, [2, 2])
 
 
 @pytest.mark.smoke
@@ -133,6 +228,7 @@ def test_histvae_1d_density_runtime_override_reaches_model(tmp_path):
         "batch_size": 2,
         "epochs": 1,
         "lr": 0.001,
+        "optimizer": "radam",
         "weight_decay": 0.0,
         "transform": False,
         "accum_grad": 1,
@@ -152,11 +248,17 @@ def test_histvae_1d_density_runtime_override_reaches_model(tmp_path):
         train_data=data,
         train_group=group,
         histogram_mode="density",
+        out_of_range_policy="clip",
+        value_transform="log1p",
     )
     histvae.prep_model("pretrain")
 
     assert histvae.config["histogram_mode"] == "density"
+    assert histvae.config["out_of_range_policy"] == "clip"
+    assert histvae.config["value_transform"] == "log1p"
     assert histvae.train_dataset.histogram_mode == "density"
+    assert histvae.train_dataset.hist.out_of_range_policy == "clip"
+    assert histvae.train_dataset.hist.value_transform == "log1p"
     (hist0, hist1), _ = next(iter(histvae.train_loader))
     assert hist0.shape == (2, 1, 4)
     assert hist1.shape == (2, 1, 4)

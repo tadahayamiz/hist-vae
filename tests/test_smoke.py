@@ -34,6 +34,7 @@ def make_config(tmp_path):
         "batch_size": 2,
         "epochs": 1,
         "lr": 0.001,
+        "optimizer": "radam",
         "weight_decay": 0.0,
         "transform": False,
         "accum_grad": 1,

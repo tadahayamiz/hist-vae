@@ -11,12 +11,20 @@ import os
 import random
 import time
 from collections.abc import Mapping
+from functools import partial
 from importlib.resources import files
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
+
+
+def _seed_worker(worker_id, base_seed):
+    worker_seed = base_seed + worker_id
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def fix_seed(seed: int=42, fix_cuda: bool=False):
@@ -40,13 +48,9 @@ def fix_seed(seed: int=42, fix_cuda: bool=False):
         torch.backends.cudnn.deterministic = True  # for fixing calculation order etc.
         torch.backends.cudnn.benchmark = False  # do not use the optimized algorithm
     # prepare worker seed for DataLoader
-    def seed_worker(worker_id):
-        worker_seed = seed + worker_id
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
     g = torch.Generator()
     g.manual_seed(seed)
-    return g, seed_worker  # for worker_init_fn in DataLoader
+    return g, partial(_seed_worker, base_seed=seed)  # for DataLoader workers
 
 
 
@@ -116,7 +120,24 @@ def load_yaml_config(config_path: str=None):
 
 
 
-def save_experiment(config, model, optimizer, history, outdir, plot_progress=True):
+def _to_builtin(value):
+    if isinstance(value, Mapping):
+        return {key: _to_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_builtin(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (Path, torch.device)):
+        return str(value)
+    return value
+
+
+def save_experiment(
+        config, model, optimizer, history, outdir, plot_progress=True,
+        checkpoint_metadata=None
+        ):
     """
     save the experiment: config, model, metrics, and progress plot
     
@@ -125,7 +146,8 @@ def save_experiment(config, model, optimizer, history, outdir, plot_progress=Tru
         ├── config.yaml
         ├── history.json
         ├── progress_loss.tif
-        ├── model_final.pt
+        ├── model_best.pt
+        ├── model_last.pt
         ├── model_1.pt
         ├── model_2.pt
         ├── ...
@@ -135,13 +157,21 @@ def save_experiment(config, model, optimizer, history, outdir, plot_progress=Tru
     # save config
     configfile = os.path.join(outdir, 'config.yaml')
     with open(configfile, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False) 
+        yaml.safe_dump(
+            _to_builtin(config), f, default_flow_style=False, sort_keys=False
+        )
     # save history
     historyfile = os.path.join(outdir, 'history.json')
     with open(historyfile, 'w') as f:
-        json.dump(history, f, sort_keys=True, indent=4)
+        json.dump(_to_builtin(history), f, sort_keys=True, indent=4)
     # save the model
-    save_checkpoint(model=model, optimizer=optimizer, name="best", outdir=outdir)
+    save_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        name="best",
+        outdir=outdir,
+        metadata=checkpoint_metadata,
+    )
     # plot progress
     if plot_progress:
         progress_plot(
@@ -152,23 +182,23 @@ def save_experiment(config, model, optimizer, history, outdir, plot_progress=Tru
 
 
 
-def save_checkpoint(model, optimizer, name, outdir):
+def save_checkpoint(model, optimizer, name, outdir, metadata=None):
     """
     save the model checkpoint
     
     """
     cpfile = os.path.join(outdir, f"model_{name}.pt")
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-        },
-        cpfile
-    )
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+    }
+    if metadata:
+        payload.update(_to_builtin(metadata))
+    torch.save(payload, cpfile)
 
 
 
-def load_experiments(model, optimizer, resdir, checkpoint_name="model_final"):
+def load_experiments(model, optimizer, resdir, checkpoint_name="model_best.pt"):
     """
     load the experiment
 
@@ -184,7 +214,7 @@ def load_experiments(model, optimizer, resdir, checkpoint_name="model_final"):
         the result directory
     
     checkpoint_name: str
-        the checkpoint name, like model_final
+        the checkpoint file name, such as model_best.pt
     
     """
     # load config

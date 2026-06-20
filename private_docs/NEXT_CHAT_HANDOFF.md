@@ -1,16 +1,18 @@
 # Next Chat Handoff
 
-Updated: 2026-06-19
+Updated: 2026-06-20
 
-The repository now supports strict `histogram_mode="count"` and
-`histogram_mode="density"`. The packaged default remains `count`; use
-`HistVAE.prep_data(..., histogram_mode="density")` for the attached 1D
-`FITC_Sum` analysis.
+The first attached-data density run completed, but sampled density inputs could
+exceed the sigmoid decoder range and total validation loss selected epoch 1 as
+KL increased. The repository now has a bounded `probability_mass` path,
+log-spaced-bin support, explicit overflow handling, deterministic full-group
+validation, active-latent logging, and canonical best checkpoint restoration.
 
-The attached CSV was smoke-tested with `in_dims=1`, `bins=64`, and
-`max_vals=[350000]`. This confirmed technical compatibility only; it is not an
-analysis result or evidence that these hyperparameters are optimal.
+For the attached `FITC_Sum` data, the reliability smoke used
+`histogram_mode="probability_mass"`, `value_transform="log1p"`,
+`out_of_range_policy="clip"`, 64 bins, and a training-only 99.9th-percentile
+range rounded to 100,000. This is technical evidence, not a final recipe.
 
-Next theme: establish the sample-level split, label objective, and training-only
-range/bin selection, then run a controlled density-versus-count comparison.
-Do not mix this with CLI cleanup or broad refactoring.
+Next theme: run a small controlled pilot across model capacity, beta, bin/range
+choice, and three seeds. Do not start the full pretraining run or mix this with
+CLI cleanup before the pilot decision is recorded.

@@ -17,6 +17,7 @@ dependencies = [
   "PyYAML",
   "matplotlib",
   "tqdm",
+  "schedulefree",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",

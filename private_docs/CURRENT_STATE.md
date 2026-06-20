@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-06-19
+Updated: 2026-06-20
 
 ## Repository identity
 
@@ -9,36 +9,45 @@ representations with a dimension-aware convolutional VAE.
 
 ## Current objective
 
-Support one-dimensional `FITC_Sum` data grouped by `sample_name` without
-forcing group-size/count intensity into the representation, while preserving
-the original count-based behavior for existing experiments.
+Prepare reliable one-dimensional pretraining for `FITC_Sum` grouped by
+`sample_name`, without forcing group-size/count intensity into the
+representation and without breaking the original count-based path.
 
 ## Active mainline
 
-- `histogram_mode` has two strict values: `count` and `density`.
-- `count` is the packaged default and preserves prior behavior.
-- `density` uses NumPy unit-integral histogram density before the existing
-  `log1p` and per-group max scaling.
-- `HistVAE.prep_data(..., histogram_mode=...)` provides a runtime override and
-  records the selected mode in the experiment config.
-- The 1D data-to-model path is verified with shape `(batch, 1, bins)`.
+- `histogram_mode` has three strict values: `count`, `density`, and
+  `probability_mass`.
+- `count` and `density` preserve the previous log1p/per-group-max path.
+- `probability_mass` produces bounded bin probabilities in `[0, 1]` whose sum
+  is 1 and is the recommended path for the current sigmoid decoder.
+- `value_transform="log1p"` provides log-spaced bins while `max_vals` remains in
+  the original data units.
+- `out_of_range_policy` explicitly selects `drop`, `clip`, or `error`.
+- Training defaults to random point subsets; evaluation defaults to full-group
+  histograms and deterministic `z = mu` reconstruction.
+- `model_best.pt` is restored and saved from the configured monitored epoch;
+  `model_last.pt` preserves the final epoch.
+- Optimizer choice is explicit (`radam_schedule_free` or `radam`), and
+  `dropout_conv` now reaches every convolutional block.
 
 ## Active references
 
 - `R-260619-00`: histogram representation mode
+- `R-260620-00`: reliable pretraining representation and evaluation contract
 
 ## Active evidence
 
 - `E-260619-00`: attached `FITC_Sum` density smoke validation
+- `E-260620-00`: attached `FITC_Sum` probability-mass reliability smoke
 
 ## Next action
 
-Define the analysis split and a reproducible experiment config for the attached
-dataset. Fit histogram range/bin choices on training data only before model
-comparison.
+Run a controlled pilot over small model capacity, bin/range choices, beta, and
+at least three seeds. Compare validation reconstruction, KL, active latent
+coordinates, and downstream usefulness before starting full pretraining.
 
 ## Deferred or out of scope
 
 - Full biological/statistical interpretation of the attached dataset
-- Density-versus-count ablation and model-quality comparison
+- Final hyperparameter selection or a claim that one representation is best
 - Cleanup of the pre-existing CLI path

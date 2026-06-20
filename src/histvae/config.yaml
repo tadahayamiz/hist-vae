@@ -8,7 +8,11 @@ in_channels: 1
 in_dims: 2
 max_vals: [10000, 10000]
 bins: 64
-histogram_mode: count  # count or density
+histogram_mode: count  # count, density, or probability_mass
+out_of_range_policy: drop  # drop, clip, or error
+value_transform: none  # none or log1p
+train_sampling_mode: random
+eval_sampling_mode: full
 num_workers: 4
 pin_memory: True
 # === Conv VAE ===
@@ -25,6 +29,7 @@ dropout_head: 0.3
 frozen: True
 use_pretrain_loss: False
 # === Training ===
+optimizer: radam_schedule_free  # radam_schedule_free or radam
 batch_size: 32
 epochs: 200
 lr: 0.01
@@ -35,5 +40,8 @@ clip_grad: 1.0
 save_model_every: 10
 patience: 10
 early_stop_mode: 'min'
+pretrain_monitor: test_recon
+finetune_monitor: test_loss
+active_latent_threshold: 0.01
 # === Logging ===
 log_every: 2

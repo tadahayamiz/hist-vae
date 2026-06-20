@@ -6,12 +6,32 @@ trainer
 
 @author: tadahaya
 """
+import copy
+import math
 import os, time
 from typing import List, Union, Any
 import torch
 from torch.nn.utils import clip_grad_norm_
 
 from .utils import save_experiment, save_checkpoint, calc_elapsed_time
+
+
+def _clone_to_cpu(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().clone()
+    if isinstance(value, dict):
+        return {key: _clone_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_to_cpu(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _set_optimizer_mode(optimizer, training):
+    method = getattr(optimizer, "train" if training else "eval", None)
+    if callable(method):
+        method()
 
 class BaseTrainer:
     def __init__(self):
@@ -91,6 +111,10 @@ class EarlyStopping:
             whether to restore model weights from the epoch with the best score
 
         """
+        if patience is not None and patience < 0:
+            raise ValueError("patience must be non-negative or None.")
+        if mode not in {"min", "max"}:
+            raise ValueError("mode must be 'min' or 'max'.")
         self.patience = patience
         self.restore_best_model = restore_best_model
         self.verbose = verbose
@@ -99,13 +123,14 @@ class EarlyStopping:
         self.counter = 0
         self.early_stop = False
         self.best_model_state = None
+        self.best_optimizer_state = None
         self._monitor_fxn = {
             "min": lambda a, b: a < b,
             "max": lambda a, b: a > b
         }[mode]
 
 
-    def __call__(self, model, score, epoch):
+    def __call__(self, model, score, epoch, optimizer=None):
         """
         Parameters
         ----------
@@ -119,26 +144,39 @@ class EarlyStopping:
             current epoch
 
         """
+        score = float(score)
+        if not math.isfinite(score):
+            raise ValueError(f"Monitored score must be finite, got {score}.")
         if self.best_score is None or self._monitor_fxn(score, self.best_score):
             self.best_score = score
             self.best_epoch = epoch
             self.counter = 0
             if self.restore_best_model:
-                self.best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                self.best_model_state = _clone_to_cpu(model.state_dict())
+                if optimizer is not None:
+                    self.best_optimizer_state = _clone_to_cpu(
+                        optimizer.state_dict()
+                    )
                 # store the best model state on CPU
         else:
             self.counter += 1
-            if self.counter >= self.patience:
+            if self.patience and self.counter >= self.patience:
                 self.early_stop = True
                 if self.verbose:
                     print(">> EarlyStopping triggered")
-                if self.restore_best_model and self.best_model_state:
-                    model.load_state_dict(self.best_model_state)
+
+
+    def restore(self, model, optimizer=None):
+        if not self.restore_best_model or self.best_model_state is None:
+            return
+        model.load_state_dict(self.best_model_state)
+        if optimizer is not None and self.best_optimizer_state is not None:
+            optimizer.load_state_dict(self.best_optimizer_state)
 
 
 class PreTrainer(BaseTrainer):
     def __init__(
-            self, config, model, optimizer=None, callbacks=[], outdir:str=""
+            self, config, model, optimizer=None, callbacks=None, outdir:str=""
             ):
         super().__init__()
         # arguments
@@ -149,7 +187,7 @@ class PreTrainer(BaseTrainer):
         self.model = model.to(self.device)
         self.optimizer = optimizer
         self.logger = BaseLogger()
-        self.callbacks = callbacks
+        self.callbacks = list(callbacks or [])
         self.callbacks.append(self.logger)
         self.outdir = outdir
         # config contents
@@ -160,9 +198,20 @@ class PreTrainer(BaseTrainer):
         self.resdir = os.path.join(self.outdir, self.exp_name)
         os.makedirs(self.resdir, exist_ok=True)
         # early stopping
-        self.early_stopping = None
-        if (config["patience"] > 0) & (config["patience"] is not None):
-            self.early_stopping = EarlyStopping(patience=config["patience"], mode="min")
+        self.monitor_metric = config.get("pretrain_monitor", "test_loss")
+        if self.monitor_metric not in {"test_loss", "test_recon", "test_kl"}:
+            raise ValueError(
+                "pretrain_monitor must be 'test_loss', 'test_recon', or 'test_kl'."
+            )
+        self.active_latent_threshold = float(
+            config.get("active_latent_threshold", 0.01)
+        )
+        if self.active_latent_threshold < 0:
+            raise ValueError("active_latent_threshold must be non-negative.")
+        self.early_stopping = EarlyStopping(
+            patience=config.get("patience", 0),
+            mode=config.get("early_stop_mode", "min"),
+        )
         # loggings
         self.history = {
             "best_score": None,
@@ -177,10 +226,18 @@ class PreTrainer(BaseTrainer):
         
         """
         start_time = time.time()
+        last_epoch = 0
         # training
         for i in range(self.config["epochs"]):
             train_loss, train_recon, train_kl = self.train_epoch(trainloader)
-            test_loss, test_recon, test_kl = self.evaluate(testloader)
+            (
+                test_loss,
+                test_recon,
+                test_kl,
+                test_latent_std_mean,
+                test_active_latent_dims,
+            ) = self.evaluate(testloader)
+            last_epoch = i + 1
             # logging
             self.run_callbacks(
                 epoch=i + 1,
@@ -189,36 +246,62 @@ class PreTrainer(BaseTrainer):
                 train_recon=train_recon,
                 train_kl=train_kl,
                 test_recon=test_recon,
-                test_kl=test_kl
+                test_kl=test_kl,
+                test_latent_std_mean=test_latent_std_mean,
+                test_active_latent_dims=test_active_latent_dims,
                 )
             if (i + 1) % self.log_every == 0:
                 print(
                     f"Epoch: {i + 1}, Train loss: {train_loss:.4f}, Test loss: {test_loss:.4f}"
                     )
             # early stopping
-            if self.early_stopping is not None:
-                self.early_stopping(self.model, test_loss, i + 1)
-                if self.early_stopping.early_stop:
-                    self.history["early_stop_epoch"] = i + 1 # record the epoch
-                    break
+            monitor_score = {
+                "test_loss": test_loss,
+                "test_recon": test_recon,
+                "test_kl": test_kl,
+            }[self.monitor_metric]
+            self.early_stopping(
+                self.model, monitor_score, i + 1, optimizer=self.optimizer
+            )
+            if self.early_stopping.early_stop:
+                self.history["early_stop_epoch"] = i + 1 # record the epoch
+                break
             # save the model
             if self.save_model_every > 0 and (i + 1) % self.save_model_every == 0:
                 save_checkpoint(model=self.model, optimizer=self.optimizer, name=f"epoch_{i + 1}", outdir=self.resdir)
         # save the experiment
+        save_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer,
+            name="last",
+            outdir=self.resdir,
+            metadata={"epoch": last_epoch},
+        )
+        self.early_stopping.restore(self.model, self.optimizer)
         elapsed_time = calc_elapsed_time(start_time)
         self.history["elapsed_time"] = elapsed_time
-        self.history["best_score"] = self.early_stopping.best_score if self.early_stopping is not None else None
-        self.history["best_epoch"] = self.early_stopping.best_epoch if self.early_stopping is not None else None
+        self.history["monitor_metric"] = self.monitor_metric
+        self.history["best_score"] = self.early_stopping.best_score
+        self.history["best_epoch"] = self.early_stopping.best_epoch
         self.history.update(self.logger.get_items())
         save_experiment(
-            config=self.config, model=self.model, optimizer=self.optimizer, history=self.history, outdir=self.resdir
+            config=self.config,
+            model=self.model,
+            optimizer=self.optimizer,
+            history=self.history,
+            outdir=self.resdir,
+            checkpoint_metadata={
+                "epoch": self.early_stopping.best_epoch,
+                "score": self.early_stopping.best_score,
+                "monitor_metric": self.monitor_metric,
+            },
             )
 
 
     def train_epoch(self, trainloader):
         """ train the model for one epoch """
         self.model.train()
-        self.optimizer.train()
+        _set_optimizer_mode(self.optimizer, training=True)
         total_loss = 0.0
         total_recon_loss = 0.0
         total_kl_loss = 0.0
@@ -255,17 +338,20 @@ class PreTrainer(BaseTrainer):
 
     def evaluate(self, testloader):
         self.model.eval()
-        self.optimizer.eval()
+        _set_optimizer_mode(self.optimizer, training=False)
         total_loss = 0.0
         total_recon_loss = 0.0
         total_kl_loss = 0.0
         total_samples = 0 # for averaging the loss
+        latent_means = []
         with torch.no_grad():
             for data, label in testloader:
                 hist0, hist1 = (x.to(self.device) for x in data)
                 label = label.to(self.device)
                 # forward
-                recon, mu, logvar = self.model(hist1) # output, mu, logvar
+                recon, mu, logvar = self.model(
+                    hist0, sample_latent=False
+                    ) # deterministic validation path
                 # loss calculation
                 loss, recon_loss, kl_loss = self.model.vae_loss(
                     recon, hist0, mu, logvar, beta=self.config["beta"]
@@ -276,11 +362,24 @@ class PreTrainer(BaseTrainer):
                 total_recon_loss += recon_loss.item() * batch_size
                 total_kl_loss += kl_loss.item() * batch_size
                 total_samples += batch_size
-        return total_loss / total_samples, total_recon_loss / total_samples, total_kl_loss / total_samples
+                latent_means.append(mu.detach().cpu())
+        latent_means = torch.cat(latent_means, dim=0)
+        latent_std = latent_means.std(dim=0, unbiased=False)
+        latent_std_mean = float(latent_std.mean())
+        active_latent_dims = int(
+            (latent_std >= self.active_latent_threshold).sum().item()
+        )
+        return (
+            total_loss / total_samples,
+            total_recon_loss / total_samples,
+            total_kl_loss / total_samples,
+            latent_std_mean,
+            active_latent_dims,
+        )
 
 
 class FineTuner(BaseTrainer):
-    def __init__(self, config, model, optimizer=None, loss_fn=None, callbacks=[], outdir=""):
+    def __init__(self, config, model, optimizer=None, loss_fn=None, callbacks=None, outdir=""):
         super().__init__()
         # arguments
         self.config = config
@@ -291,7 +390,7 @@ class FineTuner(BaseTrainer):
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.logger = BaseLogger()
-        self.callbacks = callbacks
+        self.callbacks = list(callbacks or [])
         self.callbacks.append(self.logger)
         self.outdir = outdir
         # config contents
@@ -306,9 +405,16 @@ class FineTuner(BaseTrainer):
         self.resdir = os.path.join(self.outdir, self.exp_name)
         os.makedirs(self.resdir, exist_ok=True)
         # early stopping
-        self.early_stopping = None
-        if (config["patience"] > 0) & (config["patience"] is not None):
-            self.early_stopping = EarlyStopping(patience=config["patience"], mode="min")
+        self.monitor_metric = config.get("finetune_monitor", "test_loss")
+        if self.monitor_metric not in {"test_loss", "test_accuracy"}:
+            raise ValueError(
+                "finetune_monitor must be 'test_loss' or 'test_accuracy'."
+            )
+        monitor_mode = "max" if self.monitor_metric == "test_accuracy" else "min"
+        self.early_stopping = EarlyStopping(
+            patience=config.get("patience", 0),
+            mode=monitor_mode,
+        )
         # loggings
         self.history = {
             "best_score": None,
@@ -323,10 +429,12 @@ class FineTuner(BaseTrainer):
         
         """
         start_time = time.time()
+        last_epoch = 0
         # training
         for i in range(self.config["epochs"]):
             train_loss, train_recon, train_kl, train_acc = self.train_epoch(trainloader)
             test_loss, test_recon, test_kl, test_acc = self.evaluate(testloader)
+            last_epoch = i + 1
             # logging
             self.run_callbacks(
                 epoch=i + 1,
@@ -344,29 +452,52 @@ class FineTuner(BaseTrainer):
                 print(f"  Train loss: {train_loss:.4f}, Test loss: {test_loss:.4f}")
                 print(f"  Train accuracy: {train_acc:.4f}, Test accuracy: {test_acc:.4f}")
             # early stopping
-            if self.early_stopping is not None:
-                self.early_stopping(self.model, test_loss, i + 1)
-                if self.early_stopping.early_stop:
-                    self.history["early_stop_epoch"] = i + 1 # record the epoch
-                    break
+            monitor_score = {
+                "test_loss": test_loss,
+                "test_accuracy": test_acc,
+            }[self.monitor_metric]
+            self.early_stopping(
+                self.model, monitor_score, i + 1, optimizer=self.optimizer
+            )
+            if self.early_stopping.early_stop:
+                self.history["early_stop_epoch"] = i + 1 # record the epoch
+                break
             # save the model
             if self.save_model_every > 0 and (i + 1) % self.save_model_every == 0:
                 save_checkpoint(model=self.model, optimizer=self.optimizer, name=f"epoch_{i + 1}", outdir=self.resdir)
         # save the experiment
+        save_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer,
+            name="last",
+            outdir=self.resdir,
+            metadata={"epoch": last_epoch},
+        )
+        self.early_stopping.restore(self.model, self.optimizer)
         elapsed_time = calc_elapsed_time(start_time)
         self.history["elapsed_time"] = elapsed_time
-        self.history["best_score"] = self.early_stopping.best_score if self.early_stopping is not None else None
-        self.history["best_epoch"] = self.early_stopping.best_epoch if self.early_stopping is not None else None
+        self.history["monitor_metric"] = self.monitor_metric
+        self.history["best_score"] = self.early_stopping.best_score
+        self.history["best_epoch"] = self.early_stopping.best_epoch
         self.history.update(self.logger.get_items())
         save_experiment(
-            config=self.config, model=self.model, optimizer=self.optimizer, history=self.history, outdir=self.resdir
+            config=self.config,
+            model=self.model,
+            optimizer=self.optimizer,
+            history=self.history,
+            outdir=self.resdir,
+            checkpoint_metadata={
+                "epoch": self.early_stopping.best_epoch,
+                "score": self.early_stopping.best_score,
+                "monitor_metric": self.monitor_metric,
+            },
             )
 
 
     def train_epoch(self, trainloader):
         """ train the model for one epoch """
         self.model.train()
-        self.optimizer.train()
+        _set_optimizer_mode(self.optimizer, training=True)
         total_loss = 0.0
         total_pt_loss = 0.0
         total_ft_loss = 0.0
@@ -404,6 +535,8 @@ class FineTuner(BaseTrainer):
             # Loss accumulation
             batch_size = hist0.shape[0]
             total_loss += loss.detach().item() * batch_size
+            total_pt_loss += float(pt_loss.detach().item() if torch.is_tensor(pt_loss) else pt_loss) * batch_size
+            total_ft_loss += float(ft_loss.detach().item()) * batch_size
             total_samples += batch_size
             # Accuracy calculation (disable gradients for efficiency)
             with torch.no_grad():
@@ -415,7 +548,7 @@ class FineTuner(BaseTrainer):
     def evaluate(self, testloader):
         """Evaluate the model on the test set"""
         self.model.eval()
-        self.optimizer.eval()
+        _set_optimizer_mode(self.optimizer, training=False)
         total_loss = 0.0
         total_pt_loss = 0.0
         total_ft_loss = 0.0
@@ -428,7 +561,9 @@ class FineTuner(BaseTrainer):
                 label = label.to(self.device)
                 # forward/loss calculation
                 if self.use_pretrain_loss:
-                    logits, recon, mu, logvar = self.model(hist1) # use noisy hist for pretraining
+                    logits, recon, mu, logvar = self.model(
+                        hist0, sample_latent=False
+                        ) # deterministic validation path
                     pt_loss, _, _ = self.model.vae_loss(
                         recon, hist0, mu, logvar, beta=self.config["beta"]
                         )
@@ -436,13 +571,17 @@ class FineTuner(BaseTrainer):
                     ft_loss = self.loss_fn(logits, label)
                     loss = pt_loss + ft_loss
                 else:
-                    logits, recon, mu, logvar = self.model(hist0) # use original hist
+                    logits, recon, mu, logvar = self.model(
+                        hist0, sample_latent=False
+                        ) # use original hist
                     ft_loss = self.loss_fn(logits, label)
                     pt_loss = 0
                     loss = ft_loss
                 # Loss accumulation
                 batch_size = hist0.shape[0]
                 total_loss += loss.item() * batch_size # detach() is not necessary
+                total_pt_loss += float(pt_loss.item() if torch.is_tensor(pt_loss) else pt_loss) * batch_size
+                total_ft_loss += float(ft_loss.item()) * batch_size
                 total_samples += batch_size
                 # Accuracy calculation
                 predictions = torch.argmax(logits, dim=1)
