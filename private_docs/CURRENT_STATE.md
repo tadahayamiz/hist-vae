@@ -47,6 +47,9 @@ not the definition of the model.
 - The simplex decoder supports one-, two-, and three-dimensional histograms and
   guarantees non-negative reconstructions whose total mass is one.
 - The observation-space forward KL is separate from the usual latent VAE KL.
+- The latent KL supports a strict constant or zero-to-beta linear warmup
+  schedule. Warmup runs are selected by deterministic validation
+  reconstruction rather than changing total loss.
 - Training can reconstruct a deterministic full-sample target from a random
   finite point subset.
 - Technical conditioning is optional and decoder-only:
@@ -61,6 +64,7 @@ not the definition of the model.
 
 - `R-260619-00`: histogram representation mode
 - `R-260620-01`: grouped-measure representation contract
+- `R-260620-02`: latent-KL schedule contract
 
 ## Active evidence
 
@@ -68,16 +72,19 @@ not the definition of the model.
 - `E-260620-00`: bounded-input and deterministic-evaluation smoke
 - `E-260620-01`: FITC probability-mass pilot motivating a simplex decoder
 - `E-260620-02`: grouped-measure implementation and attached-data smoke
+- `E-260620-03`: reconstruction gate and latent-KL warmup smoke
 
 ## Next action
 
-Run a reconstruction-first attached-data pilot with technical conditioning off,
-small capacity, random input/full target, simplex softmax, forward KL, and
-`beta=0`. Compare against a train-mean distribution baseline before adding
-latent regularization.
+Run a controlled unconditioned latent-KL pilot over a small beta grid and at
+least three seeds. Keep the validated small architecture, random-input/full-
+target contract, and reconstruction-based checkpoint selection fixed. Report
+validation forward KL, active dimensions, same-sample random-view stability,
+and between-sample separation.
 
-After that base path clears the baseline, compare `condition_mode: none`
-against `decoder` only where the technical categories overlap across biological labels.
+Only after the unconditioned latent is characterized should
+`condition_mode: none` be compared with `decoder`, and only where technical
+categories overlap across biological labels.
 
 ## Deferred or out of scope
 

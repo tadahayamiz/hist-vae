@@ -22,7 +22,7 @@ from .models import (
     validate_decoder_output_mode,
     validate_reconstruction_loss,
 )
-from .trainer import PreTrainer, FineTuner
+from .trainer import FineTuner, PreTrainer, validate_latent_kl_schedule
 from .data_handler import (
     DataHandler,
     plot_hist,
@@ -144,6 +144,7 @@ class HistVAE:
             self.config.get("condition_dim", 0)
             )
         validate_grouped_measure_contract(self.config)
+        validate_latent_kl_schedule(self.config)
         self.config["optimizer"] = validate_optimizer(
             self.config.get("optimizer", "radam_schedule_free")
             )

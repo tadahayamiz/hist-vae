@@ -179,6 +179,29 @@ invariance or resolve biological-label confounding. Runs with
 `condition_mode: none` and `condition_mode: decoder` should be compared, and
 technical-condition predictability from the latent should be reported.
 
+### Latent-KL scheduling
+
+Pretraining can use the configured latent-KL weight at every epoch or introduce
+it gradually after reconstruction starts to form:
+
+```yaml
+beta: 0.0001
+latent_kl_schedule: linear_warmup
+latent_kl_warmup_epochs: 25
+pretrain_monitor: test_recon
+```
+
+`constant` requires `latent_kl_warmup_epochs: 0`. `linear_warmup` uses zero
+latent-KL weight at epoch 1, reaches `beta` at the requested warmup epoch, and
+then keeps that value. Warmup requires reconstruction-based checkpoint
+selection because total VAE loss changes as beta changes. Epochs before the
+final beta is reached are logged but are not eligible for early stopping or the
+best checkpoint, so `epochs` must be at least `latent_kl_warmup_epochs`. The
+effective beta and monitoring eligibility are written to `history.json`, and
+best/last checkpoint beta values are stored in their checkpoint files. The
+schedule is applied by the pretrainer; fine-tuning with pretraining loss uses
+the configured final `beta`.
+
 Probability-mass normalization intentionally removes group size. Event count or
 exposure-normalized event rate is a separate feature/modeling path and is not
 implicitly contained in the current shape latent.

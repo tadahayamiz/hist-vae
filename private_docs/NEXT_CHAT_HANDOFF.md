@@ -2,26 +2,25 @@
 
 Updated: 2026-06-20
 
-The biological sample is now the explicit grouping unit. Acquisition `slice`
-values are treated as spatial partitions of the same sample and are merged by
-`sample_name`; no slice hierarchy is part of the mainline.
+The biological sample remains the explicit grouping unit; acquisition-only
+`slice` values are pooled by `sample_name`. The canonical path is probability
+mass, simplex softmax, forward KL, random input, and deterministic full-group
+target. Optional technical conditioning remains decoder-only and is off in the
+primary run.
 
-The previous probability-mass pilot proved that bounded inputs and
-deterministic validation worked, but legacy sigmoid/MSE reconstruction was
-approximately 1,237 times worse than the train-mean MSE baseline and selected a
-collapsed latent. The repo now includes a generic simplex-softmax decoder,
-forward-KL reconstruction, random-input/full-target denoising, and optional
-decoder-only generic technical conditioning.
+The reconstruction-first gate has now passed on the attached FITC data. With a
+small `[8, 16]` encoder/decoder, latent dimension 4, and `beta=0`, validation
+forward KL reached `0.02285` versus the train-mean baseline `0.06056`; all four
+latent coordinates were active.
 
-The first implementation smoke passed all 47 tests and completed one epoch on
-the attached data with probability mass conserved by target, input, and
-reconstruction.
+The repo now implements `latent_kl_schedule: constant | linear_warmup`. Linear
+warmup starts at zero, reaches `beta` at the configured warmup epoch, requires
+`pretrain_monitor: test_recon`, and records the effective beta in history and
+best/last checkpoints. A single-seed `beta=1e-4`, 25-epoch warmup smoke reached
+validation forward KL `0.02128` with 4/4 active coordinates.
 
-Next one theme: run a longer reconstruction-first pilot with
-`condition_mode: none`, small capacity, and `beta=0`. Do not add OT, a mass
-head, supervised labels, or adversarial batch removal in the same run.
-
-If the base model clears the train-mean distribution baseline, the following
-separate theme is a controlled `none` versus `decoder` technical-conditioning
-ablation. Report label-by-batch contingency first; conditioning does not solve
-perfect confounding.
+Next one theme: run a small unconditioned beta grid over at least three seeds
+and evaluate reconstruction, same-sample random-view stability, and
+between-sample separation. Do not add OT, a mass head, supervised labels, or
+adversarial batch removal in the same phase. Decoder conditioning is the
+following separate ablation and requires label-by-condition overlap reporting.

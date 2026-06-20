@@ -25,10 +25,18 @@ Updated: 2026-06-20
 - Added focused grouped-measure and conditioning tests.
 - Recorded the failed legacy sigmoid probability-mass pilot and the new
   implementation smoke.
+- Cleared the reconstruction-first gate on the attached data: validation
+  forward KL improved from the train-mean baseline `0.06056` to `0.02285` with
+  `beta=0`.
+- Added strict constant and linear-warmup latent-KL schedules, per-epoch beta
+  logging, and beta provenance in best/last checkpoints.
+- Verified a 50-epoch `beta=1e-4` warmup smoke with all four latent dimensions
+  active and validation forward KL `0.02128`.
 
 ## Verification
 
-- Full pytest including slow tests: 47 passed
+- Full pytest including slow tests: 57 passed
+- Latent-KL schedule focused tests: 10 passed
 - Simplex output verified in 1D, 2D, and 3D
 - Synthetic decoder-conditioned pretraining completed and wrote the canonical
   best checkpoint
@@ -41,17 +49,13 @@ Updated: 2026-06-20
 
 ## Next
 
-- Run a longer attached-data reconstruction-first pilot with:
-  - technical conditioning off
-  - latent 4 or 8
-  - hidden `[8, 16]` or `[16, 32]`
-  - `beta=0` initially
-  - train-mean distribution baseline
-- Confirm that validation forward KL improves materially and that the decoder
-  is not merely learning the global mean.
-- Add a gradual latent-KL schedule only after reconstruction is established.
-- Evaluate same-sample random-view stability and between-sample separation.
-- Run technical-conditioning ablation only after reporting label-by-condition overlap.
+- Run an unconditioned beta-target grid with at least three seeds.
+- Keep `pretrain_monitor: test_recon` and compare against the fixed train-mean
+  forward-KL baseline.
+- Evaluate same-sample random-view latent stability and between-sample
+  separation for each candidate checkpoint.
+- Run technical-conditioning ablation only after reporting label-by-condition
+  overlap.
 
 ## Deferred
 

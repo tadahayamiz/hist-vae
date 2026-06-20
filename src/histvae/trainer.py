@@ -9,11 +9,103 @@ trainer
 import copy
 import math
 import os, time
+from numbers import Integral
 from typing import List, Union, Any
 import torch
 from torch.nn.utils import clip_grad_norm_
 
 from .utils import save_experiment, save_checkpoint, calc_elapsed_time
+
+
+LATENT_KL_SCHEDULES = ("constant", "linear_warmup")
+
+
+def validate_latent_kl_schedule(config):
+    """Normalize and validate the pretraining latent-KL schedule in-place."""
+    schedule = config.get("latent_kl_schedule", "constant")
+    if schedule not in LATENT_KL_SCHEDULES:
+        raise ValueError(
+            f"Unsupported latent_kl_schedule: {schedule!r}. "
+            "Use 'constant' or 'linear_warmup'."
+        )
+
+    beta_value = config.get("beta", 1.0)
+    if isinstance(beta_value, bool):
+        raise ValueError("beta must be finite and non-negative.")
+    try:
+        beta = float(beta_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("beta must be finite and non-negative.") from exc
+    if not math.isfinite(beta) or beta < 0:
+        raise ValueError("beta must be finite and non-negative.")
+
+    warmup_epochs = config.get("latent_kl_warmup_epochs", 0)
+    if (
+            isinstance(warmup_epochs, bool)
+            or not isinstance(warmup_epochs, Integral)
+            ):
+        raise ValueError("latent_kl_warmup_epochs must be an integer.")
+    warmup_epochs = int(warmup_epochs)
+
+    if schedule == "constant":
+        if warmup_epochs != 0:
+            raise ValueError(
+                "latent_kl_warmup_epochs must be 0 when "
+                "latent_kl_schedule='constant'."
+            )
+    else:
+        epochs = config.get("epochs")
+        if (
+                isinstance(epochs, bool)
+                or not isinstance(epochs, Integral)
+                or epochs < 1
+                ):
+            raise ValueError(
+                "epochs must be a positive integer when "
+                "latent_kl_schedule='linear_warmup'."
+            )
+        if beta <= 0:
+            raise ValueError(
+                "latent_kl_schedule='linear_warmup' requires beta > 0."
+            )
+        if warmup_epochs < 2:
+            raise ValueError(
+                "latent_kl_schedule='linear_warmup' requires "
+                "latent_kl_warmup_epochs >= 2."
+            )
+        if warmup_epochs > epochs:
+            raise ValueError(
+                "latent_kl_warmup_epochs must not exceed epochs."
+            )
+
+    config["beta"] = beta
+    config["latent_kl_schedule"] = schedule
+    config["latent_kl_warmup_epochs"] = warmup_epochs
+    return config
+
+
+def latent_kl_weight(config, epoch):
+    """Return the latent-KL weight for a one-indexed training epoch."""
+    validate_latent_kl_schedule(config)
+    if isinstance(epoch, bool) or not isinstance(epoch, Integral) or epoch < 1:
+        raise ValueError("epoch must be a positive integer.")
+    epoch = int(epoch)
+
+    beta = config["beta"]
+    if config["latent_kl_schedule"] == "constant":
+        return beta
+
+    warmup_epochs = config["latent_kl_warmup_epochs"]
+    progress = min((epoch - 1) / (warmup_epochs - 1), 1.0)
+    return beta * progress
+
+
+def latent_kl_monitor_start_epoch(config):
+    """Return the first epoch eligible for best-checkpoint monitoring."""
+    validate_latent_kl_schedule(config)
+    if config["latent_kl_schedule"] == "constant":
+        return 1
+    return config["latent_kl_warmup_epochs"]
 
 
 def _clone_to_cpu(value):
@@ -200,6 +292,10 @@ class PreTrainer(BaseTrainer):
         super().__init__()
         # arguments
         self.config = config
+        validate_latent_kl_schedule(self.config)
+        self.latent_kl_schedule = self.config["latent_kl_schedule"]
+        self.current_beta = latent_kl_weight(self.config, epoch=1)
+        self.monitor_start_epoch = latent_kl_monitor_start_epoch(self.config)
         self.device = config.get(
             "device", "cuda" if torch.cuda.is_available() else "cpu"
             )
@@ -222,6 +318,15 @@ class PreTrainer(BaseTrainer):
         if self.monitor_metric not in {"test_loss", "test_recon", "test_kl"}:
             raise ValueError(
                 "pretrain_monitor must be 'test_loss', 'test_recon', or 'test_kl'."
+            )
+        if (
+                self.latent_kl_schedule != "constant"
+                and self.monitor_metric != "test_recon"
+                ):
+            raise ValueError(
+                "pretrain_monitor='test_recon' is required when "
+                "latent_kl_schedule is not constant because scheduled total "
+                "loss values are not directly comparable across warmup epochs."
             )
         self.active_latent_threshold = float(
             config.get("active_latent_threshold", 0.01)
@@ -249,6 +354,8 @@ class PreTrainer(BaseTrainer):
         last_epoch = 0
         # training
         for i in range(self.config["epochs"]):
+            epoch = i + 1
+            self.current_beta = latent_kl_weight(self.config, epoch=epoch)
             train_loss, train_recon, train_kl = self.train_epoch(trainloader)
             (
                 test_loss,
@@ -257,10 +364,11 @@ class PreTrainer(BaseTrainer):
                 test_latent_std_mean,
                 test_active_latent_dims,
             ) = self.evaluate(testloader)
-            last_epoch = i + 1
+            last_epoch = epoch
+            monitor_eligible = epoch >= self.monitor_start_epoch
             # logging
             self.run_callbacks(
-                epoch=i + 1,
+                epoch=epoch,
                 train_loss=train_loss,
                 test_loss=test_loss,
                 train_recon=train_recon,
@@ -269,10 +377,13 @@ class PreTrainer(BaseTrainer):
                 test_kl=test_kl,
                 test_latent_std_mean=test_latent_std_mean,
                 test_active_latent_dims=test_active_latent_dims,
+                beta=self.current_beta,
+                monitor_eligible=monitor_eligible,
                 )
-            if (i + 1) % self.log_every == 0:
+            if epoch % self.log_every == 0:
                 print(
-                    f"Epoch: {i + 1}, Train loss: {train_loss:.4f}, Test loss: {test_loss:.4f}"
+                    f"Epoch: {epoch}, Train loss: {train_loss:.4f}, "
+                    f"Test loss: {test_loss:.4f}, Beta: {self.current_beta:.6g}"
                     )
             # early stopping
             monitor_score = {
@@ -280,29 +391,50 @@ class PreTrainer(BaseTrainer):
                 "test_recon": test_recon,
                 "test_kl": test_kl,
             }[self.monitor_metric]
-            self.early_stopping(
-                self.model, monitor_score, i + 1, optimizer=self.optimizer
-            )
-            if self.early_stopping.early_stop:
-                self.history["early_stop_epoch"] = i + 1 # record the epoch
-                break
+            if monitor_eligible:
+                self.early_stopping(
+                    self.model, monitor_score, epoch, optimizer=self.optimizer
+                )
+                if self.early_stopping.early_stop:
+                    self.history["early_stop_epoch"] = epoch # record the epoch
+                    break
             # save the model
-            if self.save_model_every > 0 and (i + 1) % self.save_model_every == 0:
-                save_checkpoint(model=self.model, optimizer=self.optimizer, name=f"epoch_{i + 1}", outdir=self.resdir)
+            if self.save_model_every > 0 and epoch % self.save_model_every == 0:
+                save_checkpoint(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    name=f"epoch_{epoch}",
+                    outdir=self.resdir,
+                    metadata={"epoch": epoch, "beta": self.current_beta},
+                )
+        if self.early_stopping.best_epoch is None:
+            raise RuntimeError(
+                "No epoch was eligible for best-checkpoint monitoring."
+            )
         # save the experiment
         save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             name="last",
             outdir=self.resdir,
-            metadata={"epoch": last_epoch},
+            metadata={
+                "epoch": last_epoch,
+                "beta": latent_kl_weight(self.config, epoch=last_epoch),
+            },
         )
         self.early_stopping.restore(self.model, self.optimizer)
         elapsed_time = calc_elapsed_time(start_time)
         self.history["elapsed_time"] = elapsed_time
         self.history["monitor_metric"] = self.monitor_metric
+        self.history["monitor_start_epoch"] = self.monitor_start_epoch
         self.history["best_score"] = self.early_stopping.best_score
         self.history["best_epoch"] = self.early_stopping.best_epoch
+        self.history["best_beta"] = latent_kl_weight(
+            self.config, epoch=self.early_stopping.best_epoch
+        )
+        self.history["last_beta"] = latent_kl_weight(
+            self.config, epoch=last_epoch
+        )
         self.history.update(self.logger.get_items())
         save_experiment(
             config=self.config,
@@ -314,6 +446,9 @@ class PreTrainer(BaseTrainer):
                 "epoch": self.early_stopping.best_epoch,
                 "score": self.early_stopping.best_score,
                 "monitor_metric": self.monitor_metric,
+                "beta": latent_kl_weight(
+                    self.config, epoch=self.early_stopping.best_epoch
+                ),
             },
             )
 
@@ -340,7 +475,7 @@ class PreTrainer(BaseTrainer):
                 ) # output, mu, logvar
             # loss calculation
             loss, recon_loss, kl_loss = self.model.vae_loss(
-                recon, hist0, mu, logvar, beta=self.config["beta"]
+                recon, hist0, mu, logvar, beta=self.current_beta
                 )
             # note: loss is averaged over the batch
             # backpropagation
@@ -380,7 +515,7 @@ class PreTrainer(BaseTrainer):
                     ) # deterministic validation path
                 # loss calculation
                 loss, recon_loss, kl_loss = self.model.vae_loss(
-                    recon, hist0, mu, logvar, beta=self.config["beta"]
+                    recon, hist0, mu, logvar, beta=self.current_beta
                     )
                 # Loss accumulation
                 batch_size = hist0.shape[0]

@@ -182,7 +182,7 @@ Deferred:
 ```text
 - event-rate or total-mass encoder/decoder head
 - OT reconstruction auxiliary loss
-- beta warmup/free-bits policy
+- free-bits or alternative latent regularization beyond R-260620-02
 - partition-aware resampling
 - adversarial batch removal
 - disease-label supervision

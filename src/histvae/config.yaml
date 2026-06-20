@@ -25,7 +25,9 @@ decoder_output_mode: legacy_sigmoid  # legacy_sigmoid or simplex_softmax
 reconstruction_loss: mse  # mse or forward_kl
 condition_mode: none  # none or decoder
 condition_dim: 0
-beta: 1.0
+beta: 1.0  # final latent-KL weight
+latent_kl_schedule: constant  # constant or linear_warmup
+latent_kl_warmup_epochs: 0
 # === Linear head ===
 # latent_dim: 128
 num_classes: 2
