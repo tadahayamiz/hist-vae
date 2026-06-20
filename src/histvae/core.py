@@ -10,17 +10,27 @@ a class specific to the model
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from schedulefree import RAdamScheduleFree
+try:
+    from schedulefree import RAdamScheduleFree
+except ImportError:  # pragma: no cover - optional dependency fallback
+    class RAdamScheduleFree(optim.RAdam):
+        """Compatibility fallback when schedulefree is unavailable."""
+
+        def train(self):
+            return self
+
+        def eval(self):
+            return self
 import numpy as np
 import pandas as pd
 import os, yaml
 from matplotlib import pyplot as plt
 from datetime import datetime
 
-from .src.models import ModelHandler
-from .src.trainer import PreTrainer, FineTuner
-from .src.data_handler import DataHandler, plot_hist
-from .src.utils import fix_seed
+from .models import ModelHandler
+from .trainer import PreTrainer, FineTuner
+from .data_handler import DataHandler, plot_hist, validate_histogram_mode
+from .utils import fix_seed
 
 class HistVAE:
     def __init__(
@@ -29,6 +39,9 @@ class HistVAE:
         # arguments
         assert config is not None, "!! config must be given !!"
         self.config = config
+        self.config["histogram_mode"] = validate_histogram_mode(
+            self.config.get("histogram_mode", "count")
+            )
         self.outdir = outdir
         self.exp_name = exp_name
         self.seed = seed
@@ -60,9 +73,20 @@ class HistVAE:
 
     def prep_data(
             self, train_data=None, train_group=None, train_label=None, train_transform=None,
-            test_data=None, test_group=None, test_label=None, test_transform=None
+            test_data=None, test_group=None, test_label=None, test_transform=None,
+            histogram_mode=None
             ):
-        """ prepare data """
+        """Prepare grouped point data as histograms.
+
+        Parameters
+        ----------
+        histogram_mode: str, optional
+            Runtime override for the configured histogram representation.
+            Use ``"count"`` for the original count/intensity behavior or
+            ``"density"`` to normalize each histogram to unit integral.
+        """
+        if histogram_mode is not None:
+            self.config["histogram_mode"] = validate_histogram_mode(histogram_mode)
         if train_transform is None:
             train_transform = self.config.get("transform", True)
         if test_transform is None:
@@ -147,14 +171,26 @@ class HistVAE:
             print(">> Training is done.")
 
 
-    # ToDo: check this
     def predict(self, data_loader=None):
-        """ prediction """
+        """Run classifier inference with a fine-tuned model.
+
+        Parameters
+        ----------
+        data_loader: torch.utils.data.DataLoader
+            DataLoader that yields ``((hist0, hist1), label)``.
+
+        Returns
+        -------
+        preds, probs, labels: np.ndarray
+            Predicted class indices, classifier logits, and labels.
+        """
         if data_loader is None:
             raise ValueError("!! Give data_loader !!")
         if self.model is None:
             raise ValueError("!! fit or load_model first !!")
-        self.finetuned_model.eval()
+        if self.loss_fn is None:
+            raise RuntimeError("!! predict is only available after prep_model('finetune') !!")
+        self.model.eval()
         preds = []
         probs = []
         labels = []
@@ -231,7 +267,6 @@ class HistVAE:
         plot_hist(hist_list, output, **plot_params)
 
 
-    # ToDo: check this
     def qual_eval(self, dataset, query_indices, outdir:str=""):
         """
         qualitative evaluation
@@ -298,7 +333,6 @@ class Preprocess:
         self.label = None
 
 
-    # ToDo: check this
     def fit_transform(self, df):
         """
         preprocess the data
@@ -371,7 +405,7 @@ class Preprocess:
 
     def check_transform(
             self, raw_data, group, indices:list=[], num_points:int=4096, bins:int=64,
-            **plot_params
+            histogram_mode="count", **plot_params
             ):
         """
         check transform
@@ -393,7 +427,10 @@ class Preprocess:
             mask = np.where(group == idx)[0]
             raw = raw_data[mask]
             # converted data
-            hist = self.to_hist(raw_data, group, idx, num_points=num_points, bins=bins)
+            hist = self.to_hist(
+                raw_data, group, idx, num_points=num_points, bins=bins,
+                histogram_mode=histogram_mode
+                )
             # summary
             list_raw.append(raw)
             list_hist.append(hist)
@@ -403,7 +440,10 @@ class Preprocess:
         plot_hist(hist_list=list_hist, title_list=list_title, **plot_params)
 
 
-    def to_hist(self, raw_data, group, idx:int, num_points:int=4096, bins=64):
+    def to_hist(
+            self, raw_data, group, idx:int, num_points:int=4096, bins=64,
+            histogram_mode="count"
+            ):
         """
         convert to histogram
 
@@ -417,7 +457,9 @@ class Preprocess:
             idxs0 = np.random.choice(pointcloud.shape[0], num_points, replace=True)
             pointcloud0 = pointcloud[idxs0, :]
         # prepare histogram
-        hist0 = calc_hist(pointcloud0, bins=bins)
+        hist0 = calc_hist(
+            pointcloud0, bins=bins, histogram_mode=histogram_mode
+            )
         # normalize the histogram
         hist0 = np.log1p(hist0) # log1p for numerical stability
         tmp = np.max(hist0) # store the max value for normalization
@@ -425,23 +467,29 @@ class Preprocess:
         return hist0
 
 
-def calc_hist(X, bins=16):
-    try:
-        s = X.shape[1]
-    except IndexError:
-        s = 1
-    if s == 1:
-        hist, _ = np.histogram(X, bins=bins, density=False)
-    elif s == 2:
-        hist, _, _ = np.histogram2d(X[:, 0], X[:, 1], bins=bins, density=False)
-    elif s == 3:
-        hist, _ = np.histogramdd(X, bins=bins, density=False)
-    else:
-        raise ValueError("!! Input array must be 1D, 2D, or 3D. !!")
+def calc_hist(X, bins=16, histogram_mode="count"):
+    density = validate_histogram_mode(histogram_mode) == "density"
+    with np.errstate(divide="ignore", invalid="ignore"):
+        try:
+            s = X.shape[1]
+        except IndexError:
+            s = 1
+        if s == 1:
+            hist, _ = np.histogram(X, bins=bins, density=density)
+        elif s == 2:
+            hist, _, _ = np.histogram2d(
+                X[:, 0], X[:, 1], bins=bins, density=density
+                )
+        elif s == 3:
+            hist, _ = np.histogramdd(X, bins=bins, density=density)
+        else:
+            raise ValueError("!! Input array must be 1D, 2D, or 3D. !!")
+    if density and not np.all(np.isfinite(hist)):
+        raise ValueError("Density histogram is undefined for empty input data.")
     return hist
 
 
-def plot_hist(hist_list, output="", **plot_params):
+def plot_hist(hist_list, output="", show: bool=False, **plot_params):
     """
     Plot histograms (1D, 2D).
 
@@ -503,11 +551,12 @@ def plot_hist(hist_list, output="", **plot_params):
     plt.tight_layout()
     if output:
         plt.savefig(output)
-    plt.show()
+    if show:
+        plt.show()
     plt.close()
 
 
-def plot_scatter(points_list, output="", **plot_params):
+def plot_scatter(points_list, output="", show: bool=False, **plot_params):
     """
     Plot scatter plots from list of 2D point arrays.
 

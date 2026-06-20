@@ -8,6 +8,7 @@ in_channels: 1
 in_dims: 2
 max_vals: [10000, 10000]
 bins: 64
+histogram_mode: count  # count or density
 num_workers: 4
 pin_memory: True
 # === Conv VAE ===

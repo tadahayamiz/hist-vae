@@ -14,15 +14,26 @@ import inspect
 
 import torch
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms.functional as TF
 
 # functions
+HISTOGRAM_MODES = ("count", "density")
+
+
+def validate_histogram_mode(histogram_mode):
+    if histogram_mode not in HISTOGRAM_MODES:
+        raise ValueError(
+            f"Unsupported histogram_mode: {histogram_mode!r}. "
+            "Use 'count' or 'density'."
+        )
+    return histogram_mode
+
+
 class Histogram:
     """
     A class optimized to compute histograms efficiently without repeated dimension checks.
     """
 
-    def __init__(self, dimension, max_vals, bins_per_dim):
+    def __init__(self, dimension, max_vals, bins_per_dim, histogram_mode="count"):
         """
         Initialize the Histogram object with the optimal histogram function based on dimension.
 
@@ -36,9 +47,15 @@ class Histogram:
 
         bins_per_dim : int or list
             Number of bins for each dimension.
+
+        histogram_mode : str
+            ``"count"`` keeps raw bin counts. ``"density"`` returns a
+            probability density whose integral over the histogram range is 1.
         """
         self.dimension = dimension
         self.max_vals = np.asarray(max_vals)
+        self.histogram_mode = validate_histogram_mode(histogram_mode)
+        self.density = self.histogram_mode == "density"
 
         if isinstance(bins_per_dim, int):
             bins_per_dim = [bins_per_dim] * dimension
@@ -60,18 +77,19 @@ class Histogram:
             self.hist_func = self._hist_nd
 
     def _hist_1d(self, data):
-        hist, _ = np.histogram(data, bins=self.edges[0])
+        hist, _ = np.histogram(data, bins=self.edges[0], density=self.density)
         return hist
 
     def _hist_2d(self, data):
         hist, _, _ = np.histogram2d(
             data[:, 0], data[:, 1],
-            bins=[self.edges[1], self.edges[0]]
+            bins=[self.edges[1], self.edges[0]],
+            density=self.density,
         )
         return hist
 
     def _hist_nd(self, data):
-        hist, _ = np.histogramdd(data, bins=self.edges)
+        hist, _ = np.histogramdd(data, bins=self.edges, density=self.density)
         return hist
 
     def compute(self, data):
@@ -88,10 +106,17 @@ class Histogram:
         hist : np.ndarray
             Computed histogram.
         """
-        return self.hist_func(data)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            hist = self.hist_func(data)
+        if self.density and not np.all(np.isfinite(hist)):
+            raise ValueError(
+                "Density histogram is undefined for the configured range. "
+                "Ensure max_vals includes at least one observation in every group."
+            )
+        return hist
 
 
-def plot_hist(hist_list, output="", **plot_params):
+def plot_hist(hist_list, output="", show: bool=False, **plot_params):
     """
     Plot histograms (1D, 2D).
 
@@ -153,14 +178,16 @@ def plot_hist(hist_list, output="", **plot_params):
     plt.tight_layout()
     if output:
         plt.savefig(output)
-    plt.show()
+    if show:
+        plt.show()
     plt.close()
 
 
 class PointHistDataset(Dataset):
     def __init__(
             self, data, group, label=None, max_vals=(), transform=False,
-            num_points=768, bins=64, transform_params=None
+            num_points=768, bins=64, transform_params=None,
+            histogram_mode="count"
             ):
         """
         Parameters
@@ -185,11 +212,18 @@ class PointHistDataset(Dataset):
 
         num_points: int
             the number of points to be sampled
+
+        histogram_mode: str
+            ``"count"`` preserves the original count-based representation.
+            ``"density"`` removes group-size intensity by normalizing each
+            histogram to unit integral before the existing log/max scaling.
         
         """
         super().__init__()
         # check the input
-        assert data.shape[0] == group.shape[0] == label.shape[0], "!! data, group, and label must have the same number of samples !!"
+        assert data.shape[0] == group.shape[0], "!! data and group must have the same number of samples !!"
+        if label is not None:
+            assert data.shape[0] == label.shape[0], "!! data, group, and label must have the same number of samples !!"
         assert len(max_vals) == data.shape[1], "!! max_vals must have the same number of dimensions as data !!"
         self.data = data
         self.group = group
@@ -198,6 +232,7 @@ class PointHistDataset(Dataset):
         self.num_points = num_points
         self.ndim = data.shape[1]
         self.max_vals = max_vals
+        self.histogram_mode = validate_histogram_mode(histogram_mode)
         # tie the group to the data
         self.unique_groups = np.unique(group)
         self.idx2group = {i: j for i, j in enumerate(self.unique_groups)} # map index in the dataset to the group
@@ -213,7 +248,9 @@ class PointHistDataset(Dataset):
         else:
             self._transform_fxn = lambda x: x
         # prepare histogram
-        self.hist = Histogram(self.ndim, max_vals, bins)
+        self.hist = Histogram(
+            self.ndim, max_vals, bins, histogram_mode=self.histogram_mode
+        )
         # store normalization parameters
         # note: Dataset cannnot modify the data, so we need to store the normalization parameters
         self.log1p_max = dict()
@@ -361,6 +398,18 @@ class PCAugmentation:
 
 
 class PointHistDataLoader(DataLoader):
+    @staticmethod
+    def _collate_fn(batch):
+        data = [item[0] for item in batch]
+        labels = [item[1] for item in batch]
+        hist0 = torch.stack([item[0] for item in data], dim=0)
+        hist1 = torch.stack([item[1] for item in data], dim=0)
+        if labels[0] is None:
+            label_batch = torch.full((len(labels),), -1, dtype=torch.int64)
+        else:
+            label_batch = torch.stack(labels, dim=0)
+        return (hist0, hist1), label_batch
+
     def __init__(
             self, dataset, batch_size, shuffle=False, num_workers=2,
             pin_memory=True, generator=None, worker_init_fn=None
@@ -377,6 +426,7 @@ class PointHistDataLoader(DataLoader):
             pin_memory=pin_memory,
             generator=generator,
             worker_init_fn=worker_init_fn,
+            collate_fn=self._collate_fn,
             )
 
 
