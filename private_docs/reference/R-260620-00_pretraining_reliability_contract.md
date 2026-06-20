@@ -1,6 +1,6 @@
 # R-260620-00: Reliable pretraining representation and evaluation contract
 
-Status: active  
+Status: superseded  
 Updated: 2026-06-20
 
 ## Decision
@@ -38,3 +38,8 @@ Validation history records reconstruction, KL, mean latent-coordinate standard
 deviation, and the number of coordinates above `active_latent_threshold`.
 These are diagnostics; no single metric alone establishes representation
 quality.
+
+## Supersession
+
+The deterministic evaluation and checkpoint requirements remain valid, but the
+probability-mass decoder contract is replaced by R-260620-01.

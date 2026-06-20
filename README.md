@@ -74,52 +74,119 @@ packaged default config < user config file < CLI/runtime overrides
 
 This means `src/histvae/config.yaml` provides the baseline defaults, an optional external YAML overrides those defaults, and runtime values such as `exp_name` and `device` are applied last.
 
-### Histogram representation
+### Histogram and grouped-measure representations
 
-Histogram construction can preserve the original bin-count representation or
-remove group-size intensity with either a density or bounded probability mass:
+The packaged defaults preserve the legacy count path:
 
 ```yaml
-histogram_mode: count  # original behavior; default
-# histogram_mode: density  # unit-integral density + legacy log/max scaling
-# histogram_mode: probability_mass  # bin probabilities in [0, 1], sum to 1
+histogram_mode: count
+decoder_output_mode: legacy_sigmoid
+reconstruction_loss: mse
+train_target_sampling_mode: paired
+condition_mode: none
 ```
 
-The mode can also be overridden when preparing data. For one-dimensional
-`FITC_Sum` values grouped by `sample_name`, the input arrays have shapes
-`(n_rows, 1)` and `(n_rows,)` respectively:
+For distribution-shape learning from grouped low-dimensional points, use the
+canonical grouped-measure path:
+
+```yaml
+histogram_mode: probability_mass
+value_transform: log1p
+out_of_range_policy: clip
+
+decoder_output_mode: simplex_softmax
+reconstruction_loss: forward_kl
+
+train_sampling_mode: random
+train_target_sampling_mode: full
+eval_sampling_mode: full
+eval_target_sampling_mode: full
+transform: false
+
+condition_mode: none
+```
+
+`probability_mass` converts every group to non-negative bin masses that sum to
+one. `simplex_softmax` applies softmax over all spatial bins, so the decoder
+returns the same type of object in 1D, 2D, and 3D. `forward_kl` is the
+reconstruction divergence between the target and decoded distributions; the
+usual VAE latent KL remains the separate term weighted by `beta`.
+
+The grouped-measure denoising target can be fixed to the complete group while
+the model input is generated from a random point subset. This estimates a
+stable sample-level distribution rather than reconstructing one noisy subset
+from another. The legacy independent random target remains available through
+`train_target_sampling_mode: paired`.
+
+Acquisition partitions such as image slices or tiles do not require a separate
+model level when they only split one specimen's measured area. Give all points
+the same group identifier and they are pooled before histogram construction.
+Partition columns can remain in the source table for QC.
+
+For one-dimensional `FITC_Sum` values grouped by `sample_name`:
 
 ```python
 data = df[["FITC_Sum"]].to_numpy(dtype="float32")
 group = df["sample_name"].to_numpy()
 
 config["in_dims"] = 1
-config["max_vals"] = [350000]
-
+config["max_vals"] = [100000]
+config["histogram_mode"] = "probability_mass"
 config["value_transform"] = "log1p"
 config["out_of_range_policy"] = "clip"
+config["decoder_output_mode"] = "simplex_softmax"
+config["reconstruction_loss"] = "forward_kl"
+config["train_target_sampling_mode"] = "full"
+config["transform"] = False
 
-model = HistVAE(config=config, exp_name="fitc-probability")
+model = HistVAE(config=config, exp_name="fitc-measure")
 model.prep_data(
     train_data=data,
     train_group=group,
-    histogram_mode="probability_mass",
 )
 ```
 
-`count` and `density` retain their legacy log/max normalization. The recommended
-bounded representation for a sigmoid decoder is `probability_mass`, which
-normalizes in-range bin counts to sum to one without the legacy scaling.
-`value_transform: log1p` creates log-spaced bins while keeping `max_vals` in the
-original data units. `out_of_range_policy: clip` collects underflow and overflow
-in the edge bins instead of silently dropping them; `drop` preserves the prior
-behavior and `error` rejects them.
+### Optional decoder-side technical conditioning
 
-By default, training uses two random point subsets per group, while validation
-uses the full group and `z = mu`, making repeated validation and latent
-extraction deterministic. Pretraining checkpoints are selected by
-`pretrain_monitor` (`test_recon` in the packaged config). `model_best.pt`
-contains the monitored best epoch and `model_last.pt` preserves the final epoch.
+Sample-level technical covariates can be excluded or supplied only to the
+decoder through a generic numeric condition vector:
+
+```yaml
+condition_mode: decoder
+condition_dim: 8
+```
+
+Each condition vector must be finite and constant within a group. Categorical
+batch values should be converted outside HistVAE to one-hot or another explicit
+numeric encoding whose mapping is fitted on the training split. Continuous
+technical covariates can use the same API after train-fitted scaling:
+
+```python
+model.prep_data(
+    train_data=train_data,
+    train_group=train_group,
+    train_condition=train_condition,
+    test_data=test_data,
+    test_group=test_group,
+    test_condition=test_condition,
+)
+```
+
+The encoder and `get_latent()` do not receive the condition vector. Decoder
+conditioning therefore provides an optional nuisance-covariate path without
+concatenating it to the returned latent, but it does not guarantee nuisance
+invariance or resolve biological-label confounding. Runs with
+`condition_mode: none` and `condition_mode: decoder` should be compared, and
+technical-condition predictability from the latent should be reported.
+
+Probability-mass normalization intentionally removes group size. Event count or
+exposure-normalized event rate is a separate feature/modeling path and is not
+implicitly contained in the current shape latent.
+
+By default, full-group validation and `z = mu` make repeated validation and
+latent extraction deterministic. Pretraining checkpoints are selected by
+`pretrain_monitor`; `model_best.pt` contains the monitored best epoch and
+`model_last.pt` preserves the final epoch.
 
 Command line usage with the packaged default config:
 

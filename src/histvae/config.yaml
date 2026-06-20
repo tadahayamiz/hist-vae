@@ -13,12 +13,18 @@ out_of_range_policy: drop  # drop, clip, or error
 value_transform: none  # none or log1p
 train_sampling_mode: random
 eval_sampling_mode: full
+train_target_sampling_mode: paired  # paired (legacy) or full
+eval_target_sampling_mode: full
 num_workers: 4
 pin_memory: True
 # === Conv VAE ===
 latent_dim: 128
 hidden_dims: [32, 64, 128, 256]
 dropout_conv: 0.3
+decoder_output_mode: legacy_sigmoid  # legacy_sigmoid or simplex_softmax
+reconstruction_loss: mse  # mse or forward_kl
+condition_mode: none  # none or decoder
+condition_dim: 0
 beta: 1.0
 # === Linear head ===
 # latent_dim: 128

@@ -33,6 +33,25 @@ def _set_optimizer_mode(optimizer, training):
     if callable(method):
         method()
 
+
+def _prepare_histogram_batch(data, device, condition_mode):
+    if condition_mode == "none":
+        if len(data) != 2:
+            raise ValueError(
+                "condition_mode='none' expects (hist0, hist1) batches."
+            )
+        hist0, hist1 = (value.to(device) for value in data)
+        return hist0, hist1, None
+    if condition_mode == "decoder":
+        if len(data) != 3:
+            raise ValueError(
+                "condition_mode='decoder' expects "
+                "(hist0, hist1, condition) batches."
+            )
+        hist0, hist1, condition = (value.to(device) for value in data)
+        return hist0, hist1, condition
+    raise ValueError(f"Unsupported condition_mode: {condition_mode!r}.")
+
 class BaseTrainer:
     def __init__(self):
         self.callbacks: List[Any] = []
@@ -194,6 +213,7 @@ class PreTrainer(BaseTrainer):
         self.exp_name = config["exp_name"]
         self.save_model_every = config["save_model_every"]
         self.log_every = config["log_every"]
+        self.condition_mode = config.get("condition_mode", "none")
         # I/O
         self.resdir = os.path.join(self.outdir, self.exp_name)
         os.makedirs(self.resdir, exist_ok=True)
@@ -310,10 +330,14 @@ class PreTrainer(BaseTrainer):
         self.optimizer.zero_grad()
         for i, (data, label) in enumerate(trainloader):
             # data = (original hist, noisy hist)
-            hist0, hist1 = (x.to(self.device) for x in data)
+            hist0, hist1, condition = _prepare_histogram_batch(
+                data, self.device, self.condition_mode
+            )
             label = label.to(self.device)
             # forward
-            recon, mu, logvar = self.model(hist1) # output, mu, logvar
+            recon, mu, logvar = self.model(
+                hist1, condition=condition
+                ) # output, mu, logvar
             # loss calculation
             loss, recon_loss, kl_loss = self.model.vae_loss(
                 recon, hist0, mu, logvar, beta=self.config["beta"]
@@ -346,11 +370,13 @@ class PreTrainer(BaseTrainer):
         latent_means = []
         with torch.no_grad():
             for data, label in testloader:
-                hist0, hist1 = (x.to(self.device) for x in data)
+                hist0, hist1, condition = _prepare_histogram_batch(
+                    data, self.device, self.condition_mode
+                )
                 label = label.to(self.device)
                 # forward
                 recon, mu, logvar = self.model(
-                    hist0, sample_latent=False
+                    hist1, sample_latent=False, condition=condition
                     ) # deterministic validation path
                 # loss calculation
                 loss, recon_loss, kl_loss = self.model.vae_loss(
@@ -397,6 +423,7 @@ class FineTuner(BaseTrainer):
         self.exp_name = config["exp_name"]
         self.save_model_every = config["save_model_every"]
         self.log_every = config["log_every"]
+        self.condition_mode = config.get("condition_mode", "none")
         if config["frozen"]:
             self.use_pretrain_loss = False # if the model is frozen, pretrain loss is never used
         else:
@@ -507,11 +534,15 @@ class FineTuner(BaseTrainer):
         self.optimizer.zero_grad()
         for i, (data, label) in enumerate(trainloader):
             # data = (original hist, noisy hist)
-            hist0, hist1 = (x.to(self.device) for x in data)
+            hist0, hist1, condition = _prepare_histogram_batch(
+                data, self.device, self.condition_mode
+            )
             label = label.to(self.device)
             # forward/loss calculation
             if self.use_pretrain_loss:
-                logits, recon, mu, logvar = self.model(hist1) # use noisy hist for pretraining
+                logits, recon, mu, logvar = self.model(
+                    hist1, condition=condition
+                    ) # use noisy hist for pretraining
                 pt_loss, _, _ = self.model.vae_loss(
                     recon, hist0, mu, logvar, beta=self.config["beta"]
                     )
@@ -519,7 +550,9 @@ class FineTuner(BaseTrainer):
                 ft_loss = self.loss_fn(logits, label)
                 loss = pt_loss + ft_loss
             else:
-                logits, recon, mu, logvar = self.model(hist0) # use original hist
+                logits, recon, mu, logvar = self.model(
+                    hist0, condition=condition
+                    ) # use original hist
                 ft_loss = self.loss_fn(logits, label)
                 pt_loss = 0
                 loss = ft_loss
@@ -557,12 +590,14 @@ class FineTuner(BaseTrainer):
         with torch.no_grad():
             for data, label in testloader:
                 # Move data to device
-                hist0, hist1 = (x.to(self.device) for x in data)
+                hist0, hist1, condition = _prepare_histogram_batch(
+                    data, self.device, self.condition_mode
+                )
                 label = label.to(self.device)
                 # forward/loss calculation
                 if self.use_pretrain_loss:
                     logits, recon, mu, logvar = self.model(
-                        hist0, sample_latent=False
+                        hist1, sample_latent=False, condition=condition
                         ) # deterministic validation path
                     pt_loss, _, _ = self.model.vae_loss(
                         recon, hist0, mu, logvar, beta=self.config["beta"]
@@ -572,8 +607,8 @@ class FineTuner(BaseTrainer):
                     loss = pt_loss + ft_loss
                 else:
                     logits, recon, mu, logvar = self.model(
-                        hist0, sample_latent=False
-                        ) # use original hist
+                        hist0, sample_latent=False, condition=condition
+                        ) # use original histogram
                     ft_loss = self.loss_fn(logits, label)
                     pt_loss = 0
                     loss = ft_loss

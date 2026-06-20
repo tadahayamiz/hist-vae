@@ -4,3 +4,5 @@
 |---|---|---|
 | E-260619-00 | Attached FITC density smoke validation | complete |
 | E-260620-00 | Attached FITC probability-mass reliability smoke | complete |
+| E-260620-01 | FITC probability-mass pilot motivating a simplex decoder | complete |
+| E-260620-02 | Grouped-measure implementation smoke | complete |

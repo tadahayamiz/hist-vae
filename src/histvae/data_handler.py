@@ -20,6 +20,7 @@ HISTOGRAM_MODES = ("count", "density", "probability_mass")
 OUT_OF_RANGE_POLICIES = ("drop", "clip", "error")
 VALUE_TRANSFORMS = ("none", "log1p")
 SAMPLING_MODES = ("random", "full")
+TARGET_SAMPLING_MODES = ("paired", "full")
 
 
 def validate_histogram_mode(histogram_mode):
@@ -56,6 +57,36 @@ def validate_sampling_mode(sampling_mode):
             "Use 'random' or 'full'."
         )
     return sampling_mode
+
+
+def validate_target_sampling_mode(target_sampling_mode):
+    if target_sampling_mode not in TARGET_SAMPLING_MODES:
+        raise ValueError(
+            f"Unsupported target_sampling_mode: {target_sampling_mode!r}. "
+            "Use 'paired' or 'full'."
+        )
+    return target_sampling_mode
+
+
+def validate_condition_array(condition, n_observations=None, name="condition"):
+    values = np.asarray(condition)
+    if values.ndim == 1:
+        values = values.reshape(-1, 1)
+    if values.ndim != 2:
+        raise ValueError(
+            f"{name} must have shape (n_observations, condition_dim)."
+        )
+    if n_observations is not None and values.shape[0] != n_observations:
+        raise ValueError(
+            f"{name} must have {n_observations} rows; got {values.shape[0]}."
+        )
+    try:
+        values = values.astype(np.float32, copy=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be numeric.") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain only finite values.")
+    return values
 
 
 class Histogram:
@@ -139,7 +170,7 @@ class Histogram:
     def _hist_2d(self, data):
         hist, _, _ = np.histogram2d(
             data[:, 0], data[:, 1],
-            bins=[self.edges[1], self.edges[0]],
+            bins=[self.edges[0], self.edges[1]],
             density=self.density,
         )
         return hist
@@ -291,7 +322,8 @@ class PointHistDataset(Dataset):
             self, data, group, label=None, max_vals=(), transform=False,
             num_points=768, bins=64, transform_params=None,
             histogram_mode="count", out_of_range_policy="drop",
-            value_transform="none", sampling_mode="random"
+            value_transform="none", sampling_mode="random",
+            target_sampling_mode="paired", condition=None
             ):
         """
         Parameters
@@ -325,8 +357,20 @@ class PointHistDataset(Dataset):
             not apply the legacy log/max scaling.
 
         sampling_mode: str
-            ``"random"`` draws two point subsets for training. ``"full"``
-            deterministically uses all points in the group for both views.
+            ``"random"`` draws the model-input point subset. ``"full"``
+            deterministically uses all points in the group.
+
+        target_sampling_mode: str
+            ``"paired"`` preserves the legacy independent random target when
+            ``sampling_mode="random"``. ``"full"`` uses the deterministic
+            full-group histogram as the denoising target.
+
+        condition: np.ndarray, optional
+            Numeric sample-level condition vector repeated for every point in
+            a group. A one-dimensional array is treated as one feature. Values
+            must be finite and constant within each group. Categorical
+            technical batches should be encoded outside the model, for example
+            as train-fitted one-hot vectors.
         
         """
         super().__init__()
@@ -334,6 +378,10 @@ class PointHistDataset(Dataset):
         assert data.shape[0] == group.shape[0], "!! data and group must have the same number of samples !!"
         if label is not None:
             assert data.shape[0] == label.shape[0], "!! data, group, and label must have the same number of samples !!"
+        if condition is not None:
+            condition = validate_condition_array(
+                condition, n_observations=data.shape[0]
+            )
         assert len(max_vals) == data.shape[1], "!! max_vals must have the same number of dimensions as data !!"
         self.data = data
         self.group = group
@@ -344,13 +392,41 @@ class PointHistDataset(Dataset):
         self.max_vals = max_vals
         self.histogram_mode = validate_histogram_mode(histogram_mode)
         self.sampling_mode = validate_sampling_mode(sampling_mode)
+        self.target_sampling_mode = validate_target_sampling_mode(
+            target_sampling_mode
+        )
         if self.sampling_mode == "full" and transform:
             raise ValueError("sampling_mode='full' requires transform=False.")
+        if self.histogram_mode == "probability_mass" and transform:
+            raise ValueError(
+                "histogram_mode='probability_mass' requires transform=False; "
+                "the legacy histogram-value augmentation does not preserve "
+                "the probability simplex."
+            )
         # tie the group to the data
         self.unique_groups = np.unique(group)
         self.idx2group = {i: j for i, j in enumerate(self.unique_groups)} # map index in the dataset to the group
         self.group2idx = {v: k for k, v in self.idx2group.items()} # map group to index in the dataset
         self.num_data = len(self.unique_groups)
+        self.condition = condition
+        self.group_condition = None
+        self.condition_dim = 0
+        if condition is not None:
+            self.condition_dim = condition.shape[1]
+            group_condition = {}
+            for group_idx in self.unique_groups:
+                selected_indices = np.where(self.group == group_idx)[0]
+                group_values = condition[selected_indices]
+                reference = group_values[0]
+                if not np.allclose(
+                    group_values, reference, rtol=0.0, atol=1e-7
+                ):
+                    raise ValueError(
+                        "condition must be constant within each group; "
+                        f"found multiple values for group {group_idx!r}."
+                    )
+                group_condition[group_idx] = reference.copy()
+            self.group_condition = group_condition
         self.transform = transform
         if transform:
             if transform_params is not None:
@@ -396,10 +472,13 @@ class PointHistDataset(Dataset):
         else:
             # limit the number of points if necessary (random sampling)
             replace = pointcloud.shape[0] <= self.num_points
-            idxs0 = np.random.choice(
-                pointcloud.shape[0], self.num_points, replace=replace
-            )
-            pointcloud0 = pointcloud[idxs0, :]
+            if self.target_sampling_mode == "full":
+                pointcloud0 = pointcloud
+            else:
+                idxs0 = np.random.choice(
+                    pointcloud.shape[0], self.num_points, replace=replace
+                )
+                pointcloud0 = pointcloud[idxs0, :]
             idxs1 = np.random.choice(
                 pointcloud.shape[0], self.num_points, replace=replace
             )
@@ -418,8 +497,14 @@ class PointHistDataset(Dataset):
             label = torch.tensor(label, dtype=torch.int64)
         else:
             label = None
+        data = (hist0, hist1)
+        if self.group_condition is not None:
+            condition = torch.tensor(
+                self.group_condition[group_idx], dtype=torch.float32
+            )
+            data = data + (condition,)
         # return the data
-        return (hist0, hist1), label
+        return data, label
         # hist0, original; hist1, noisy
 
 
@@ -468,6 +553,13 @@ class PointHistDataset(Dataset):
         transform on
 
         """
+        if self.sampling_mode == "full":
+            raise ValueError("sampling_mode='full' requires transform=False.")
+        if self.histogram_mode == "probability_mass":
+            raise ValueError(
+                "histogram_mode='probability_mass' does not support the "
+                "legacy histogram-value augmentation."
+            )
         self.transform = True
         trans = PCAugmentation(**transform_params)
         self._transform_fxn = trans
@@ -531,11 +623,24 @@ class PointHistDataLoader(DataLoader):
         labels = [item[1] for item in batch]
         hist0 = torch.stack([item[0] for item in data], dim=0)
         hist1 = torch.stack([item[1] for item in data], dim=0)
+        tuple_lengths = {len(item) for item in data}
+        if len(tuple_lengths) != 1:
+            raise ValueError("All dataset items must have the same tuple length.")
+        tuple_length = tuple_lengths.pop()
+        if tuple_length not in {2, 3}:
+            raise ValueError(
+                "Dataset tuples must contain (hist0, hist1) or "
+                "(hist0, hist1, condition)."
+            )
+        data_batch = (hist0, hist1)
+        if tuple_length == 3:
+            condition = torch.stack([item[2] for item in data], dim=0)
+            data_batch = data_batch + (condition,)
         if labels[0] is None:
             label_batch = torch.full((len(labels),), -1, dtype=torch.int64)
         else:
             label_batch = torch.stack(labels, dim=0)
-        return (hist0, hist1), label_batch
+        return data_batch, label_batch
 
     def __init__(
             self, dataset, batch_size, shuffle=False, num_workers=2,
@@ -564,8 +669,8 @@ class DataHandler:
 
 
     def make_dataset(
-            self, data, group, label=None, transform=False,
-            sampling_mode="random"
+            self, data, group, label=None, condition=None, transform=False,
+            sampling_mode="random", target_sampling_mode="paired"
             ):
         """
         make dataset for training and testing
@@ -575,6 +680,10 @@ class DataHandler:
         assert data.shape[0] == group.shape[0], "!! data, group, and label must have the same number of samples !!"
         if label is not None:
             assert data.shape[0] == label.shape[0], "!! data, group, and label must have the same number of samples !!"
+        if condition is not None:
+            condition = validate_condition_array(
+                condition, n_observations=data.shape[0]
+            )
         # prepare params
         ds_params = inspect.signature(PointHistDataset.__init__).parameters # diff
         ds_args = {k: self.config[k] for k in ds_params if k in self.config}
@@ -585,9 +694,12 @@ class DataHandler:
         })
         if label is not None:
             ds_args["label"] = label
+        if condition is not None:
+            ds_args["condition"] = condition
         if transform is not None:
             ds_args["transform"] = transform
         ds_args["sampling_mode"] = sampling_mode
+        ds_args["target_sampling_mode"] = target_sampling_mode
         # create dataset
         dataset = PointHistDataset(**ds_args)
         return dataset

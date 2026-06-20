@@ -2,17 +2,26 @@
 
 Updated: 2026-06-20
 
-The first attached-data density run completed, but sampled density inputs could
-exceed the sigmoid decoder range and total validation loss selected epoch 1 as
-KL increased. The repository now has a bounded `probability_mass` path,
-log-spaced-bin support, explicit overflow handling, deterministic full-group
-validation, active-latent logging, and canonical best checkpoint restoration.
+The biological sample is now the explicit grouping unit. Acquisition `slice`
+values are treated as spatial partitions of the same sample and are merged by
+`sample_name`; no slice hierarchy is part of the mainline.
 
-For the attached `FITC_Sum` data, the reliability smoke used
-`histogram_mode="probability_mass"`, `value_transform="log1p"`,
-`out_of_range_policy="clip"`, 64 bins, and a training-only 99.9th-percentile
-range rounded to 100,000. This is technical evidence, not a final recipe.
+The previous probability-mass pilot proved that bounded inputs and
+deterministic validation worked, but legacy sigmoid/MSE reconstruction was
+approximately 1,237 times worse than the train-mean MSE baseline and selected a
+collapsed latent. The repo now includes a generic simplex-softmax decoder,
+forward-KL reconstruction, random-input/full-target denoising, and optional
+decoder-only generic technical conditioning.
 
-Next theme: run a small controlled pilot across model capacity, beta, bin/range
-choice, and three seeds. Do not start the full pretraining run or mix this with
-CLI cleanup before the pilot decision is recorded.
+The first implementation smoke passed all 47 tests and completed one epoch on
+the attached data with probability mass conserved by target, input, and
+reconstruction.
+
+Next one theme: run a longer reconstruction-first pilot with
+`condition_mode: none`, small capacity, and `beta=0`. Do not add OT, a mass
+head, supervised labels, or adversarial batch removal in the same run.
+
+If the base model clears the train-mean distribution baseline, the following
+separate theme is a controlled `none` versus `decoder` technical-conditioning
+ablation. Report label-by-batch contingency first; conditioning does not solve
+perfect confounding.

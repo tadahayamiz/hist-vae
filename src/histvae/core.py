@@ -16,7 +16,12 @@ import os, yaml
 from matplotlib import pyplot as plt
 from datetime import datetime
 
-from .models import ModelHandler
+from .models import (
+    ModelHandler,
+    validate_condition_mode,
+    validate_decoder_output_mode,
+    validate_reconstruction_loss,
+)
 from .trainer import PreTrainer, FineTuner
 from .data_handler import (
     DataHandler,
@@ -24,6 +29,8 @@ from .data_handler import (
     validate_histogram_mode,
     validate_out_of_range_policy,
     validate_sampling_mode,
+    validate_target_sampling_mode,
+    validate_condition_array,
     validate_value_transform,
 )
 from .utils import fix_seed
@@ -39,6 +46,41 @@ def validate_optimizer(optimizer_name):
             "Use 'radam_schedule_free' or 'radam'."
         )
     return optimizer_name
+
+
+def validate_grouped_measure_contract(config):
+    """Validate strict combinations for the grouped-measure model path."""
+    histogram_mode = config["histogram_mode"]
+    decoder_output_mode = config["decoder_output_mode"]
+    reconstruction_loss = config["reconstruction_loss"]
+    condition_mode = config["condition_mode"]
+
+    if decoder_output_mode == "simplex_softmax" and histogram_mode != "probability_mass":
+        raise ValueError(
+            "decoder_output_mode='simplex_softmax' requires "
+            "histogram_mode='probability_mass'."
+        )
+    if reconstruction_loss == "forward_kl":
+        if histogram_mode != "probability_mass":
+            raise ValueError(
+                "reconstruction_loss='forward_kl' requires "
+                "histogram_mode='probability_mass'."
+            )
+        if decoder_output_mode != "simplex_softmax":
+            raise ValueError(
+                "reconstruction_loss='forward_kl' requires "
+                "decoder_output_mode='simplex_softmax'."
+            )
+
+    condition_dim = int(config.get("condition_dim", 0))
+    if condition_mode == "none" and condition_dim != 0:
+        raise ValueError(
+            "condition_dim must be 0 when condition_mode='none'."
+        )
+    if condition_mode == "decoder" and condition_dim <= 0:
+        raise ValueError(
+            "condition_dim must be positive when condition_mode='decoder'."
+        )
 
 
 def make_optimizer(parameters, config):
@@ -83,6 +125,25 @@ class HistVAE:
         self.config["eval_sampling_mode"] = validate_sampling_mode(
             self.config.get("eval_sampling_mode", "full")
             )
+        self.config["train_target_sampling_mode"] = validate_target_sampling_mode(
+            self.config.get("train_target_sampling_mode", "paired")
+            )
+        self.config["eval_target_sampling_mode"] = validate_target_sampling_mode(
+            self.config.get("eval_target_sampling_mode", "full")
+            )
+        self.config["decoder_output_mode"] = validate_decoder_output_mode(
+            self.config.get("decoder_output_mode", "legacy_sigmoid")
+            )
+        self.config["reconstruction_loss"] = validate_reconstruction_loss(
+            self.config.get("reconstruction_loss", "mse")
+            )
+        self.config["condition_mode"] = validate_condition_mode(
+            self.config.get("condition_mode", "none")
+            )
+        self.config["condition_dim"] = int(
+            self.config.get("condition_dim", 0)
+            )
+        validate_grouped_measure_contract(self.config)
         self.config["optimizer"] = validate_optimizer(
             self.config.get("optimizer", "radam_schedule_free")
             )
@@ -116,11 +177,14 @@ class HistVAE:
 
 
     def prep_data(
-            self, train_data=None, train_group=None, train_label=None, train_transform=None,
-            test_data=None, test_group=None, test_label=None, test_transform=None,
+            self, train_data=None, train_group=None, train_label=None,
+            train_condition=None, train_transform=None,
+            test_data=None, test_group=None, test_label=None,
+            test_condition=None, test_transform=None,
             histogram_mode=None, out_of_range_policy=None,
             value_transform=None, train_sampling_mode=None,
-            test_sampling_mode=None
+            test_sampling_mode=None, train_target_sampling_mode=None,
+            test_target_sampling_mode=None, condition_mode=None
             ):
         """Prepare grouped point data as histograms.
 
@@ -137,6 +201,22 @@ class HistVAE:
 
         value_transform: str, optional
             Runtime override for linear (``"none"``) or log1p-spaced bins.
+
+        train_condition, test_condition: np.ndarray, optional
+            Numeric row-level condition vectors repeated within each group.
+            They are accepted only when ``condition_mode="decoder"``, must be
+            finite, must have width ``condition_dim``, and must be constant
+            within every group. The encoder never receives these values.
+            Categorical technical batches should be encoded by the caller using
+            a mapping fitted on the training split.
+
+        condition_mode: str, optional
+            Runtime override for ``"none"`` or decoder-only conditioning.
+
+        train_target_sampling_mode, test_target_sampling_mode: str, optional
+            ``"paired"`` preserves the independent sampled target used by the
+            legacy denoising path. ``"full"`` uses the deterministic full-group
+            histogram as the reconstruction target.
         """
         if histogram_mode is not None:
             self.config["histogram_mode"] = validate_histogram_mode(histogram_mode)
@@ -148,6 +228,11 @@ class HistVAE:
             self.config["value_transform"] = validate_value_transform(
                 value_transform
             )
+        if condition_mode is not None:
+            self.config["condition_mode"] = validate_condition_mode(
+                condition_mode
+            )
+        validate_grouped_measure_contract(self.config)
         if train_transform is None:
             train_transform = self.config.get("transform", True)
         if test_transform is None:
@@ -162,15 +247,71 @@ class HistVAE:
         else:
             test_sampling_mode = validate_sampling_mode(test_sampling_mode)
             self.config["eval_sampling_mode"] = test_sampling_mode
+        if train_target_sampling_mode is None:
+            train_target_sampling_mode = self.config["train_target_sampling_mode"]
+        else:
+            train_target_sampling_mode = validate_target_sampling_mode(
+                train_target_sampling_mode
+            )
+            self.config["train_target_sampling_mode"] = train_target_sampling_mode
+        if test_target_sampling_mode is None:
+            test_target_sampling_mode = self.config["eval_target_sampling_mode"]
+        else:
+            test_target_sampling_mode = validate_target_sampling_mode(
+                test_target_sampling_mode
+            )
+            self.config["eval_target_sampling_mode"] = test_target_sampling_mode
+
+        resolved_condition_mode = self.config["condition_mode"]
+        if resolved_condition_mode == "none":
+            if train_condition is not None or test_condition is not None:
+                raise ValueError(
+                    "Condition arrays were provided while condition_mode='none'."
+                )
+        else:
+            if train_condition is None:
+                raise ValueError(
+                    "train_condition is required when condition_mode='decoder'."
+                )
+            if test_data is not None and test_condition is None:
+                raise ValueError(
+                    "test_condition is required for test_data when "
+                    "condition_mode='decoder'."
+                )
+            for name, condition, data in (
+                ("train_condition", train_condition, train_data),
+                ("test_condition", test_condition, test_data),
+            ):
+                if condition is None:
+                    continue
+                condition_array = validate_condition_array(
+                    condition,
+                    n_observations=data.shape[0],
+                    name=name,
+                )
+                if condition_array.shape[1] != self.config["condition_dim"]:
+                    raise ValueError(
+                        f"{name} width must equal condition_dim="
+                        f"{self.config['condition_dim']}; got "
+                        f"{condition_array.shape[1]}."
+                    )
+                if name == "train_condition":
+                    train_condition = condition_array
+                else:
+                    test_condition = condition_array
         # dataset
         self.train_dataset = self.data_handler.make_dataset(
             data=train_data, group=train_group, label=train_label,
-            transform=train_transform, sampling_mode=train_sampling_mode
+            condition=train_condition, transform=train_transform,
+            sampling_mode=train_sampling_mode,
+            target_sampling_mode=train_target_sampling_mode,
             )
         if test_data is not None:
             self.test_dataset = self.data_handler.make_dataset(
                 data=test_data, group=test_group, label=test_label,
-                transform=test_transform, sampling_mode=test_sampling_mode
+                condition=test_condition, transform=test_transform,
+                sampling_mode=test_sampling_mode,
+                target_sampling_mode=test_target_sampling_mode,
                 )
         # dataloader
         self.train_loader = self.data_handler.make_dataloader(
@@ -268,11 +409,12 @@ class HistVAE:
         labels = []
         with torch.no_grad():
             for data, label in data_loader:
-                hist0, hist1 = (x.to(self.device) for x in data)
+                hist0, hist1 = (x.to(self.device) for x in data[:2])
+                condition = data[2].to(self.device) if len(data) == 3 else None
                 label = label.to(self.device)
                 logits, recon, mu, logvar = self.model(
-                    hist0, sample_latent=False
-                    ) # use original hist
+                    hist1, sample_latent=False, condition=condition
+                    ) # use deterministic model-input histogram
                 preds.append(logits.argmax(dim=1).cpu().numpy())
                 probs.append(logits.cpu().numpy())
                 labels.append(label.cpu().numpy())

@@ -16,6 +16,38 @@ import torch.nn.functional as F
 from enum import Enum
 import inspect
 
+
+DECODER_OUTPUT_MODES = ("legacy_sigmoid", "simplex_softmax")
+RECONSTRUCTION_LOSSES = ("mse", "forward_kl")
+CONDITION_MODES = ("none", "decoder")
+
+
+def validate_decoder_output_mode(decoder_output_mode):
+    if decoder_output_mode not in DECODER_OUTPUT_MODES:
+        raise ValueError(
+            f"Unsupported decoder_output_mode: {decoder_output_mode!r}. "
+            "Use 'legacy_sigmoid' or 'simplex_softmax'."
+        )
+    return decoder_output_mode
+
+
+def validate_reconstruction_loss(reconstruction_loss):
+    if reconstruction_loss not in RECONSTRUCTION_LOSSES:
+        raise ValueError(
+            f"Unsupported reconstruction_loss: {reconstruction_loss!r}. "
+            "Use 'mse' or 'forward_kl'."
+        )
+    return reconstruction_loss
+
+
+def validate_condition_mode(condition_mode):
+    if condition_mode not in CONDITION_MODES:
+        raise ValueError(
+            f"Unsupported condition_mode: {condition_mode!r}. "
+            "Use 'none' or 'decoder'."
+        )
+    return condition_mode
+
 # Enum for clearly managing data dimensions
 class DataDim(Enum):
     ONE_D = 1
@@ -121,8 +153,12 @@ class Encoder(nn.Module):
 
 # VAE Decoder to reconstruct the input (decoding)
 class Decoder(nn.Module):
-    def __init__(self, out_channels, hidden_dims, dim, dropout_conv=0.3):
+    def __init__(
+            self, out_channels, hidden_dims, dim, dropout_conv=0.3,
+            output_mode="legacy_sigmoid"
+            ):
         super().__init__()
+        self.output_mode = validate_decoder_output_mode(output_mode)
         hidden_dims = hidden_dims[::-1]
         layers = []
         in_channels = hidden_dims[0]
@@ -134,24 +170,39 @@ class Decoder(nn.Module):
                 )
             )
             in_channels = h_dim
-        layers.append(
-            ResidualConvTransposeBlock(
-                in_channels, out_channels, kernel_size=4, stride=2,
-                padding=1, activation="sigmoid", dim=dim,
-                dropout_conv=dropout_conv
+        if self.output_mode == "legacy_sigmoid":
+            layers.append(
+                ResidualConvTransposeBlock(
+                    in_channels, out_channels, kernel_size=4, stride=2,
+                    padding=1, activation="sigmoid", dim=dim,
+                    dropout_conv=dropout_conv
+                    )
+                # histogram data is normalized to [0, 1]
                 )
-            # histogram data is normalized to [0, 1]
-        )
-        self.decoder = nn.Sequential(*layers)
+            self.decoder = nn.Sequential(*layers)
+            self.output_layer = None
+        else:
+            ConvT = get_conv_transpose_layer(dim)
+            self.decoder = nn.Sequential(*layers)
+            self.output_layer = ConvT(
+                in_channels, out_channels, kernel_size=4, stride=2, padding=1
+            )
 
     def forward(self, x):
-        return self.decoder(x)
+        x = self.decoder(x)
+        if self.output_mode == "legacy_sigmoid":
+            return x
+        logits = self.output_layer(x)
+        probability = torch.softmax(logits.flatten(start_dim=1), dim=1)
+        return probability.view_as(logits)
 
 # main ConvVAE class
 class ConvVAE(nn.Module):
     def __init__(
             self, input_shape=None, latent_dim=128, hidden_dims=None,
-            dropout_conv=0.3
+            dropout_conv=0.3, decoder_output_mode="legacy_sigmoid",
+            reconstruction_loss="mse", condition_mode="none",
+            condition_dim=0
             ):
         """
         Variational Autoencoder (VAE) for 1D, 2D, and 3D data.
@@ -167,11 +218,61 @@ class ConvVAE(nn.Module):
         hidden_dims: list of int
             List of hidden dimensions for the encoder and decoder
 
+        dropout_conv: float
+            Dropout probability inside convolutional residual blocks.
+
+        decoder_output_mode: str
+            ``"legacy_sigmoid"`` preserves the original bounded-bin decoder.
+            ``"simplex_softmax"`` returns one probability mass over all bins.
+
+        reconstruction_loss: str
+            ``"mse"`` preserves the original loss. ``"forward_kl"`` computes
+            target-to-reconstruction KL and requires simplex output.
+
+        condition_mode: str
+            ``"none"`` disables sample-level conditioning. ``"decoder"``
+            concatenates a caller-provided numeric condition vector to the
+            latent vector before decoding. The encoder never receives the
+            condition.
+
+        condition_dim: int
+            Width of the condition vector when ``condition_mode="decoder"``.
+
         """
         super().__init__()
         # check the input
         assert input_shape is not None, "!! input_shape must be given !!"
         self.dim = DataDim(len(input_shape) - 1)
+        self.decoder_output_mode = validate_decoder_output_mode(
+            decoder_output_mode
+        )
+        self.reconstruction_loss = validate_reconstruction_loss(
+            reconstruction_loss
+        )
+        if (
+                self.reconstruction_loss == "forward_kl"
+                and self.decoder_output_mode != "simplex_softmax"
+                ):
+            raise ValueError(
+                "reconstruction_loss='forward_kl' requires "
+                "decoder_output_mode='simplex_softmax'."
+            )
+        if self.decoder_output_mode == "simplex_softmax" and input_shape[0] != 1:
+            raise ValueError(
+                "decoder_output_mode='simplex_softmax' currently requires "
+                "a single histogram channel."
+            )
+        self.condition_mode = validate_condition_mode(condition_mode)
+        self.condition_dim = int(condition_dim)
+        if self.condition_mode == "none" and self.condition_dim != 0:
+            raise ValueError(
+                "condition_dim must be 0 when condition_mode='none'."
+            )
+        if self.condition_mode == "decoder" and self.condition_dim <= 0:
+            raise ValueError(
+                "condition_dim must be positive when condition_mode='decoder'."
+            )
+        decoder_input_dim = latent_dim + self.condition_dim
         hidden_dims = hidden_dims or [32, 64, 128, 256]
         # Construct Encoder
         self.encoder = Encoder(
@@ -188,13 +289,13 @@ class ConvVAE(nn.Module):
         self.fc_mu = nn.Linear(enc_out_dim, latent_dim)
         self.fc_logvar = nn.Linear(enc_out_dim, latent_dim)
         # mapping from latent space to reconstruction features
-        self.fc_decode = nn.Linear(latent_dim, enc_out_dim)
+        self.fc_decode = nn.Linear(decoder_input_dim, enc_out_dim)
         nn.init.xavier_uniform_(self.fc_decode.weight)
         nn.init.zeros_(self.fc_decode.bias)
         # Construct Decoder
         self.decoder = Decoder(
             input_shape[0], hidden_dims, dim=self.dim,
-            dropout_conv=dropout_conv
+            dropout_conv=dropout_conv, output_mode=self.decoder_output_mode
         )
 
     def encode(self, x):
@@ -208,14 +309,42 @@ class ConvVAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z):
-        dec_input = self.fc_decode(z).view(-1, *self.enc_out_shape)
+    def _prepare_decoder_input(self, z, condition=None):
+        if self.condition_mode == "none":
+            if condition is not None:
+                raise ValueError(
+                    "condition must be omitted when condition_mode='none'."
+                )
+            return z
+        if condition is None:
+            raise ValueError(
+                "condition is required when condition_mode='decoder'."
+            )
+        if condition.ndim != 2:
+            raise ValueError(
+                "condition must have shape (batch, condition_dim)."
+            )
+        if condition.shape[0] != z.shape[0]:
+            raise ValueError("condition and latent batch sizes must match.")
+        if condition.shape[1] != self.condition_dim:
+            raise ValueError(
+                f"Expected condition width {self.condition_dim}, "
+                f"got {condition.shape[1]}."
+            )
+        if not torch.isfinite(condition).all():
+            raise ValueError("condition must contain only finite values.")
+        condition = condition.to(device=z.device, dtype=z.dtype)
+        return torch.cat([z, condition], dim=1)
+
+    def decode(self, z, condition=None):
+        decoder_input = self._prepare_decoder_input(z, condition)
+        dec_input = self.fc_decode(decoder_input).view(-1, *self.enc_out_shape)
         return self.decoder(dec_input)
 
-    def forward(self, x, sample_latent=True):
+    def forward(self, x, sample_latent=True, condition=None):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar) if sample_latent else mu
-        recon = self.decode(z)
+        recon = self.decode(z, condition=condition)
         return recon, mu, logvar
 
     def vae_loss(self, recon_x, x, mu, logvar, beta=1.0):
@@ -239,7 +368,33 @@ class ConvVAE(nn.Module):
         """
 
         batch_size = x.size(0)
-        recon_loss = F.mse_loss(recon_x, x, reduction="sum") / batch_size
+        if self.reconstruction_loss == "mse":
+            recon_loss = F.mse_loss(recon_x, x, reduction="sum") / batch_size
+        else:
+            tolerance = 1e-5
+            target_flat = x.flatten(start_dim=1)
+            recon_flat = recon_x.flatten(start_dim=1)
+            if torch.any(target_flat < -tolerance) or torch.any(recon_flat < -tolerance):
+                raise ValueError(
+                    "forward_kl requires non-negative target and reconstruction."
+                )
+            target_sums = target_flat.sum(dim=1)
+            recon_sums = recon_flat.sum(dim=1)
+            ones = torch.ones_like(target_sums)
+            if not torch.allclose(target_sums, ones, rtol=1e-5, atol=1e-5):
+                raise ValueError(
+                    "forward_kl requires each target histogram to sum to one."
+                )
+            if not torch.allclose(recon_sums, ones, rtol=1e-5, atol=1e-5):
+                raise ValueError(
+                    "forward_kl requires each reconstruction to sum to one."
+                )
+            eps = torch.finfo(recon_flat.dtype).eps
+            recon_loss = F.kl_div(
+                torch.log(recon_flat.clamp_min(eps)),
+                target_flat,
+                reduction="sum",
+            ) / batch_size
         # for clear understanding, we use sum instead of mean
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
         total_loss = recon_loss + beta * kl_loss
@@ -293,20 +448,18 @@ class LinearHead(nn.Module):
         self.linear_head = nn.Sequential(*layers)
 
 
-    def forward(self, x, sample_latent=True):
+    def forward(self, x, sample_latent=True, condition=None):
         mu, logvar = self.pretrained.encode(x)
         z = self.pretrained.reparameterize(mu, logvar) if sample_latent else mu
-        recon = self.pretrained.decode(z)
+        recon = self.pretrained.decode(z, condition=condition)
         logits = self.linear_head(mu)  # use the latent representation for classification
         return logits, recon, mu, logvar
 
 
     def vae_loss(self, recon_x, x, mu, logvar, beta=1.0):
-        batch_size = x.size(0)
-        recon_loss = F.mse_loss(recon_x, x, reduction="sum") / batch_size
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
-        total_loss = recon_loss + beta * kl_loss
-        return total_loss, recon_loss, kl_loss
+        return self.pretrained.vae_loss(
+            recon_x, x, mu, logvar, beta=beta
+        )
     
 
     def encode(self, x):
