@@ -146,6 +146,109 @@ model.prep_data(
 )
 ```
 
+### Train-fitted histogram preprocessing
+
+For new experiments, histogram transforms and percentile ranges can be fitted
+once on the training split and then reused unchanged for validation and
+holdout data. HistVAE does not silently choose a log transform or percentile;
+the contract remains explicit and is serialized into the experiment config.
+
+```python
+from histvae import (
+    AxisPreprocessingSpec,
+    HistogramPreprocessor,
+)
+
+preprocessor = HistogramPreprocessor(
+    axis_specs=[
+        AxisPreprocessingSpec(
+            name="FITC_Sum",
+            transform="log1p",       # or "none"
+            lower_mode="fixed",
+            lower_value=0.0,
+            upper_mode="quantile",
+            upper_value=None,
+            upper_quantile=0.999,
+            quantile_weighting="group_equal",
+        )
+    ],
+    bins=64,
+    histogram_mode="probability_mass",
+    tail_policy="clip",
+).fit(
+    train_data,
+    train_group,
+)
+
+preprocessor.save("preprocessing.yaml")
+
+model = HistVAE(
+    config=config,
+    exp_name="fitc-measure",
+    histogram_preprocessor=preprocessor,
+)
+model.prep_data(
+    train_data=train_data,
+    train_group=train_group,
+    test_data=validation_data,
+    test_group=validation_group,
+)
+```
+
+`quantile_weighting="event"` gives every detected event equal weight.
+`"group_equal"` gives every biological sample equal total weight when fitting
+the percentile, so samples with many events do not dominate the range.
+`tail_policy="clip"` preserves out-of-range mass in the edge bins;
+`"error"` is available when the fitted physical range must be strict. The
+preprocessor intentionally does not provide a drop-and-renormalize policy.
+
+The saved state records resolved raw bounds, axis transforms, bin counts,
+training tail fractions, and a state hash. Loading it with
+`HistogramPreprocessor.load()` reproduces the same histogram geometry.
+
+### Raw-space histogram and reconstruction plots
+
+Histogram construction and plotting use separate coordinate contracts. A model
+may use `value_transform: log1p` to define its bins while figures still use the
+original measurement coordinates. `Histogram.get_bin_edges("raw")` inverts the
+transform, and `HistVAE.check_data()` and `HistVAE.plot_reconstruction()` use
+raw coordinates by default. The default axes are linear in the original raw
+values; `log1p` is used only to construct the model bins.
+
+For probability-mass histograms with unequal raw-width bins, the default
+`plot_value_mode="auto"` displays probability density per raw-coordinate width
+or area. The plotted integral therefore remains one in raw data space. Use
+`plot_value_mode="bin_value"` only when the exact decoder tensor values per bin
+are the desired ordinate.
+
+```python
+# after fitting or loading a pretrained checkpoint
+result, figure, axes = model.plot_reconstruction(
+    dataset=model.test_dataset,
+    indices=[0, 1],
+    input_mode="full",
+    coordinate_space="raw",
+    plot_value_mode="auto",
+    axis_labels=["FITC_Sum"],
+    output="reconstruction_raw_space.png",
+)
+
+# visualize denoising from one reproducible random point subset
+result, figure, axes = model.plot_reconstruction(
+    dataset=model.test_dataset,
+    indices=[0, 1],
+    input_mode="sampled",
+    random_seed=42,
+    axis_labels=["FITC_Sum"],
+    output="denoising_raw_space.png",
+)
+```
+
+The returned `result` contains the full target, model input, reconstruction,
+posterior parameters, group identifiers, raw bin edges, and per-sample forward
+KL when that reconstruction loss is active. One- and two-dimensional
+reconstruction figures are supported.
+
 ### Optional decoder-side technical conditioning
 
 Sample-level technical covariates can be excluded or supplied only to the
@@ -237,7 +340,8 @@ repo
 │     ├─ data_handler.py
 │     ├─ models.py
 │     ├─ trainer.py
-│     └─ utils.py
+│     ├─ utils.py
+│     └─ visualization.py
 │
 ├─ tests/
 ├─ pyproject.toml

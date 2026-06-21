@@ -6,11 +6,12 @@ exp_name: null
 num_points: 2048
 in_channels: 1
 in_dims: 2
+min_vals: null  # defaults to zero on every active axis
 max_vals: [10000, 10000]
 bins: 64
 histogram_mode: count  # count, density, or probability_mass
-out_of_range_policy: drop  # drop, clip, or error
-value_transform: none  # none or log1p
+out_of_range_policy: drop  # legacy: drop, clip, or error
+value_transform: none  # none/log1p globally or one value per axis
 train_sampling_mode: random
 eval_sampling_mode: full
 train_target_sampling_mode: paired  # paired (legacy) or full

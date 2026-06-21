@@ -9,27 +9,28 @@ data handler
 import numpy as np
 import pandas as pd
 import random
-import matplotlib.pyplot as plt
 import inspect
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from .preprocessing import (
+    HISTOGRAM_MODES,
+    VALUE_TRANSFORMS,
+    HistogramPreprocessor,
+    compress_axis_setting,
+    normalize_bins,
+    normalize_range_values,
+    normalize_value_transforms,
+    validate_histogram_mode,
+    validate_value_transform,
+)
+from .visualization import histogram_bin_edges, plot_hist
+
 # functions
-HISTOGRAM_MODES = ("count", "density", "probability_mass")
 OUT_OF_RANGE_POLICIES = ("drop", "clip", "error")
-VALUE_TRANSFORMS = ("none", "log1p")
 SAMPLING_MODES = ("random", "full")
 TARGET_SAMPLING_MODES = ("paired", "full")
-
-
-def validate_histogram_mode(histogram_mode):
-    if histogram_mode not in HISTOGRAM_MODES:
-        raise ValueError(
-            f"Unsupported histogram_mode: {histogram_mode!r}. "
-            "Use 'count', 'density', or 'probability_mass'."
-        )
-    return histogram_mode
 
 
 def validate_out_of_range_policy(out_of_range_policy):
@@ -39,16 +40,6 @@ def validate_out_of_range_policy(out_of_range_policy):
             "Use 'drop', 'clip', or 'error'."
         )
     return out_of_range_policy
-
-
-def validate_value_transform(value_transform):
-    if value_transform not in VALUE_TRANSFORMS:
-        raise ValueError(
-            f"Unsupported value_transform: {value_transform!r}. "
-            "Use 'none' or 'log1p'."
-        )
-    return value_transform
-
 
 def validate_sampling_mode(sampling_mode):
     if sampling_mode not in SAMPLING_MODES:
@@ -90,78 +81,91 @@ def validate_condition_array(condition, n_observations=None, name="condition"):
 
 
 class Histogram:
-    """
-    A class optimized to compute histograms efficiently without repeated dimension checks.
-    """
+    """Compute histograms with fixed raw bounds and axis transforms."""
 
     def __init__(
             self, dimension, max_vals, bins_per_dim, histogram_mode="count",
-            out_of_range_policy="drop", value_transform="none"
+            out_of_range_policy="drop", value_transform="none", min_vals=None
             ):
-        """
-        Initialize the Histogram object with the optimal histogram function based on dimension.
+        """Initialize one histogram contract.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         dimension : int
-            The dimension of the input data (1, 2, or >=3).
-
-        max_vals : list or np.ndarray
-            Maximum values for each dimension.
-
-        bins_per_dim : int or list
-            Number of bins for each dimension.
-
-        histogram_mode : str
-            ``"count"`` keeps raw bin counts. ``"density"`` returns a
-            probability density whose integral over the histogram range is 1.
-            ``"probability_mass"`` returns non-negative bin probabilities
-            whose sum is 1.
-
-        out_of_range_policy : str
-            ``"drop"`` preserves the legacy behavior. ``"clip"`` maps
-            underflow and overflow values to the edge bins. ``"error"``
-            rejects data outside the configured range.
-
-        value_transform : str
-            ``"none"`` uses linear-width bins. ``"log1p"`` applies log1p to
-            both values and configured maxima before histogram construction.
+            Number of measurement dimensions.
+        min_vals, max_vals : sequence of float
+            Raw-space histogram bounds. ``min_vals`` defaults to zero on every
+            axis for compatibility with the legacy API.
+        bins_per_dim : int or sequence of int
+            Number of bins on each axis.
+        histogram_mode : {"count", "density", "probability_mass"}
+            Histogram value contract.
+        out_of_range_policy : {"drop", "clip", "error"}
+            Handling of rows outside the configured raw-space bounds.
+        value_transform : str or sequence of str
+            ``"none"`` or ``"log1p"`` globally, or one transform per axis.
         """
-        self.dimension = dimension
-        self.raw_max_vals = np.asarray(max_vals, dtype=np.float64)
-        if self.raw_max_vals.shape != (dimension,):
-            raise ValueError("max_vals must contain one value per dimension.")
-        if not np.all(np.isfinite(self.raw_max_vals)) or np.any(self.raw_max_vals <= 0):
-            raise ValueError("max_vals must contain finite positive values.")
+        self.dimension = int(dimension)
+        self.raw_min_vals = normalize_range_values(
+            min_vals, self.dimension, "min_vals", default=0.0
+        )
+        self.raw_max_vals = normalize_range_values(
+            max_vals, self.dimension, "max_vals"
+        )
+        if np.any(self.raw_max_vals <= self.raw_min_vals):
+            raise ValueError(
+                "max_vals must exceed min_vals on every histogram axis."
+            )
+
         self.histogram_mode = validate_histogram_mode(histogram_mode)
         self.density = self.histogram_mode == "density"
         self.probability_mass = self.histogram_mode == "probability_mass"
-        self.out_of_range_policy = validate_out_of_range_policy(out_of_range_policy)
-        self.value_transform = validate_value_transform(value_transform)
+        self.out_of_range_policy = validate_out_of_range_policy(
+            out_of_range_policy
+        )
+        self.value_transforms = normalize_value_transforms(
+            value_transform, self.dimension
+        )
+        self.value_transform = compress_axis_setting(self.value_transforms)
+        self.bins_per_dim = list(normalize_bins(bins_per_dim, self.dimension))
 
-        if self.value_transform == "log1p":
-            self.max_vals = np.log1p(self.raw_max_vals)
-        else:
-            self.max_vals = self.raw_max_vals.copy()
+        self.min_vals = self.raw_min_vals.copy()
+        self.max_vals = self.raw_max_vals.copy()
+        for axis, transform in enumerate(self.value_transforms):
+            if transform == "log1p":
+                if self.raw_min_vals[axis] < 0:
+                    raise ValueError(
+                        "value_transform='log1p' requires non-negative "
+                        f"bounds on axis {axis}."
+                    )
+                self.min_vals[axis] = np.log1p(self.raw_min_vals[axis])
+                self.max_vals[axis] = np.log1p(self.raw_max_vals[axis])
 
-        if isinstance(bins_per_dim, int):
-            bins_per_dim = [bins_per_dim] * dimension
-
-        self.bins_per_dim = bins_per_dim
-
-        # Precompute bin edges based on dimensions
         self.edges = [
-            np.linspace(0, self.max_vals[dim], self.bins_per_dim[dim] + 1)
-            for dim in range(dimension)
+            np.linspace(
+                self.min_vals[axis],
+                self.max_vals[axis],
+                self.bins_per_dim[axis] + 1,
+            )
+            for axis in range(self.dimension)
         ]
 
-        # Pre-select histogram function based on dimension
         if self.dimension == 1:
             self.hist_func = self._hist_1d
         elif self.dimension == 2:
             self.hist_func = self._hist_2d
         else:
             self.hist_func = self._hist_nd
+
+    def get_bin_edges(self, coordinate_space="raw"):
+        """Return copies of the bin edges in raw or transformed coordinates."""
+        return histogram_bin_edges(
+            min_vals=self.raw_min_vals,
+            max_vals=self.raw_max_vals,
+            bins=self.bins_per_dim,
+            value_transform=self.value_transforms,
+            coordinate_space=coordinate_space,
+        )
 
     def _hist_1d(self, data):
         hist, _ = np.histogram(data, bins=self.edges[0], density=self.density)
@@ -191,7 +195,8 @@ class Histogram:
 
         finite_rows = np.all(np.isfinite(values), axis=1)
         in_range_rows = np.all(
-            (values >= 0) & (values <= self.raw_max_vals), axis=1
+            (values >= self.raw_min_vals) & (values <= self.raw_max_vals),
+            axis=1,
         )
         valid_rows = finite_rows & in_range_rows
 
@@ -204,31 +209,20 @@ class Histogram:
         if self.out_of_range_policy == "clip":
             if not np.all(finite_rows):
                 raise ValueError("Cannot clip NaN or infinite histogram values.")
-            values = np.clip(values, 0, self.raw_max_vals)
+            values = np.clip(values, self.raw_min_vals, self.raw_max_vals)
         elif self.out_of_range_policy == "drop":
             values = values[valid_rows]
 
-        if self.value_transform == "log1p":
-            values = np.log1p(values)
+        for axis, transform in enumerate(self.value_transforms):
+            if transform == "log1p":
+                values[:, axis] = np.log1p(values[:, axis])
 
         if self.dimension == 1:
             return values[:, 0]
         return values
 
     def compute(self, data):
-        """
-        Compute histogram using the pre-selected histogram function.
-
-        Parameters:
-        -----------
-        data : np.ndarray
-            Data array of shape (n_samples, dimension).
-
-        Returns:
-        --------
-        hist : np.ndarray
-            Computed histogram.
-        """
+        """Compute one histogram under the fixed contract."""
         prepared_data = self._prepare_data(data)
         with np.errstate(divide="ignore", invalid="ignore"):
             hist = self.hist_func(prepared_data)
@@ -243,87 +237,22 @@ class Histogram:
         if self.density and not np.all(np.isfinite(hist)):
             raise ValueError(
                 "Density histogram is undefined for the configured range. "
-                "Ensure max_vals includes at least one observation in every group."
+                "Ensure the range includes at least one observation in every group."
             )
         if not np.all(np.isfinite(hist)):
             raise ValueError("Histogram contains non-finite values.")
         return hist
 
 
-def plot_hist(hist_list, output="", show: bool=False, **plot_params):
-    """
-    Plot histograms (1D, 2D).
-
-    Parameters:
-    ----------
-    hist_list : list of np.ndarray
-        List of histograms to plot.
-
-    output : str, optional
-        File path to save the plot (default: "", meaning no save).
-
-    **plot_params : dict, optional
-        Dictionary containing plot customization options:
-            - xlabel (str): Label for x-axis
-            - ylabel (str): Label for y-axis
-            - title_list (list of str): Titles for each subplot
-            - cmap (str): Colormap for 2D histograms
-            - aspect (str): Aspect ratio for 2D histograms (default: 'equal')
-            - color (str): Bar color for 1D histograms (default: 'royalblue')
-            - alpha (float): Transparency for 1D histograms (default: 0.7)
-    """
-    # Default plot parameters
-    default_params = {
-        "nrow": 1,
-        "ncol": 3,
-        "xlabel": "x",
-        "ylabel": "y",
-        "title_list": None,
-        "cmap": "viridis",
-        "aspect": "equal",
-        "color": "royalblue",
-        "alpha": 0.7
-    }
-    # merge default and custom params
-    params = {**default_params, **plot_params}
-    num_plots = len(hist_list)
-    nrow, ncol = params["nrow"], params["ncol"]
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5 * ncol, 5 * nrow))
-    axes = np.atleast_1d(axes).flatten()  # Flatten for easy iteration
-    for i, hist in enumerate(hist_list):
-        ax = axes[i]
-        dim = hist.ndim  # Detect dimensionality
-        if dim == 1:
-            ax.bar(range(len(hist)), hist, width=0.8, color=params["color"], alpha=params["alpha"])
-            ax.set_xlabel(params["xlabel"])
-            ax.set_ylabel(params["ylabel"])
-            ax.set_title(params["title_list"][i] if params["title_list"] else f'1D Histogram {i+1}')
-        elif dim == 2:
-            im = ax.imshow(hist.T, origin='lower', cmap=params["cmap"], aspect=params["aspect"])
-            fig.colorbar(im, ax=ax, label=params["ylabel"])
-            ax.set_xlabel(params["xlabel"])
-            ax.set_ylabel(params["ylabel"])
-            ax.set_title(params["title_list"][i] if params["title_list"] else f'2D Histogram {i+1}')
-        else:
-            raise NotImplementedError("Only 1D and 2D histograms are supported.")
-    # Remove unused subplots
-    for j in range(num_plots, len(axes)):
-        fig.delaxes(axes[j])
-    plt.tight_layout()
-    if output:
-        plt.savefig(output)
-    if show:
-        plt.show()
-    plt.close()
-
 
 class PointHistDataset(Dataset):
     def __init__(
-            self, data, group, label=None, max_vals=(), transform=False,
-            num_points=768, bins=64, transform_params=None,
-            histogram_mode="count", out_of_range_policy="drop",
-            value_transform="none", sampling_mode="random",
-            target_sampling_mode="paired", condition=None
+            self, data, group, label=None, max_vals=None, min_vals=None,
+            transform=False, num_points=768, bins=None, transform_params=None,
+            histogram_mode=None, out_of_range_policy=None,
+            value_transform=None, sampling_mode="random",
+            target_sampling_mode="paired", condition=None,
+            histogram_preprocessor=None
             ):
         """
         Parameters
@@ -371,9 +300,19 @@ class PointHistDataset(Dataset):
             must be finite and constant within each group. Categorical
             technical batches should be encoded outside the model, for example
             as train-fitted one-hot vectors.
+
+        histogram_preprocessor: HistogramPreprocessor, optional
+            Fitted preprocessing state. When supplied, its bounds, transforms,
+            tail policy, bin counts, and histogram mode are authoritative.
+            Explicit histogram arguments must either be omitted or match the
+            fitted state exactly.
         
         """
         super().__init__()
+        data = np.asarray(data)
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        group = np.asarray(group)
         # check the input
         assert data.shape[0] == group.shape[0], "!! data and group must have the same number of samples !!"
         if label is not None:
@@ -382,14 +321,81 @@ class PointHistDataset(Dataset):
             condition = validate_condition_array(
                 condition, n_observations=data.shape[0]
             )
-        assert len(max_vals) == data.shape[1], "!! max_vals must have the same number of dimensions as data !!"
+        self.ndim = data.shape[1]
+        if histogram_preprocessor is not None:
+            if not isinstance(histogram_preprocessor, HistogramPreprocessor):
+                raise TypeError(
+                    "histogram_preprocessor must be a HistogramPreprocessor."
+                )
+            histogram_preprocessor.require_fitted()
+            if histogram_preprocessor.dimension != self.ndim:
+                raise ValueError(
+                    "histogram_preprocessor dimensions must match data."
+                )
+            expected = histogram_preprocessor.config_overrides()
+            provided = {
+                "min_vals": min_vals,
+                "max_vals": max_vals,
+                "bins": bins,
+                "histogram_mode": histogram_mode,
+                "out_of_range_policy": out_of_range_policy,
+                "value_transform": value_transform,
+            }
+            for name, value in provided.items():
+                if value is None:
+                    continue
+                expected_value = expected[name]
+                if name in {"min_vals", "max_vals"}:
+                    matches = np.array_equal(
+                        np.asarray(value, dtype=np.float64),
+                        np.asarray(expected_value, dtype=np.float64),
+                    )
+                elif name == "bins":
+                    matches = normalize_bins(value, self.ndim) == tuple(
+                        histogram_preprocessor.bins_per_dim
+                    )
+                elif name == "value_transform":
+                    matches = normalize_value_transforms(
+                        value, self.ndim
+                    ) == histogram_preprocessor.value_transforms
+                else:
+                    matches = value == expected_value
+                if not matches:
+                    raise ValueError(
+                        f"{name} conflicts with histogram_preprocessor state."
+                    )
+            min_vals = histogram_preprocessor.min_vals
+            max_vals = histogram_preprocessor.max_vals
+            bins = histogram_preprocessor.bins
+            histogram_mode = histogram_preprocessor.histogram_mode
+            out_of_range_policy = histogram_preprocessor.tail_policy
+            value_transform = histogram_preprocessor.value_transform
+        else:
+            if max_vals is None:
+                raise ValueError("max_vals must be provided without a preprocessor.")
+            if bins is None:
+                bins = 64
+            if histogram_mode is None:
+                histogram_mode = "count"
+            if out_of_range_policy is None:
+                out_of_range_policy = "drop"
+            if value_transform is None:
+                value_transform = "none"
+
         self.data = data
         self.group = group
         self.label = label
-        self.bins = bins
+        self.bins = compress_axis_setting(normalize_bins(bins, self.ndim))
         self.num_points = num_points
-        self.ndim = data.shape[1]
-        self.max_vals = max_vals
+        self.min_vals = normalize_range_values(
+            min_vals, self.ndim, "min_vals", default=0.0
+        )
+        self.max_vals = normalize_range_values(
+            max_vals, self.ndim, "max_vals"
+        )
+        if np.any(self.max_vals <= self.min_vals):
+            raise ValueError("max_vals must exceed min_vals on every axis.")
+        self.histogram_preprocessor = histogram_preprocessor
         self.histogram_mode = validate_histogram_mode(histogram_mode)
         self.sampling_mode = validate_sampling_mode(sampling_mode)
         self.target_sampling_mode = validate_target_sampling_mode(
@@ -438,10 +444,11 @@ class PointHistDataset(Dataset):
             self._transform_fxn = lambda x: x
         # prepare histogram
         self.hist = Histogram(
-            self.ndim, max_vals, bins,
+            self.ndim, self.max_vals, self.bins,
             histogram_mode=self.histogram_mode,
             out_of_range_policy=out_of_range_policy,
             value_transform=value_transform,
+            min_vals=self.min_vals,
         )
         # store normalization parameters
         # note: Dataset cannnot modify the data, so we need to store the normalization parameters
@@ -514,6 +521,42 @@ class PointHistDataset(Dataset):
         selected_indices = np.where(self.group == group_idx)[0]
         hist = self._calc_hist(self.data[selected_indices])
         return self._normalize_hist(hist, group_idx).unsqueeze(0)
+
+    def get_sampled_histogram(self, idx, rng=None):
+        """Return one unaugmented ``num_points`` histogram for a group.
+
+        Parameters
+        ----------
+        idx : int
+            Dataset index.
+        rng : numpy.random.Generator, optional
+            Explicit random generator for reproducible visualization.
+        """
+        group_idx = self.idx2group[idx]
+        selected_indices = np.where(self.group == group_idx)[0]
+        pointcloud = self.data[selected_indices]
+        replace = pointcloud.shape[0] <= self.num_points
+        chooser = np.random if rng is None else rng
+        sampled_indices = chooser.choice(
+            pointcloud.shape[0], self.num_points, replace=replace
+        )
+        hist = self._calc_hist(pointcloud[sampled_indices])
+        return self._normalize_hist(hist, group_idx).unsqueeze(0)
+
+
+    def get_group_condition(self, idx):
+        """Return one group's condition vector, or ``None`` when disabled."""
+        if self.group_condition is None:
+            return None
+        group_idx = self.idx2group[idx]
+        return torch.tensor(
+            self.group_condition[group_idx], dtype=torch.float32
+        )
+
+
+    def get_bin_edges(self, coordinate_space="raw"):
+        """Return histogram bin edges for visualization."""
+        return self.hist.get_bin_edges(coordinate_space=coordinate_space)
 
 
     def _calc_hist(self, data):
@@ -670,7 +713,8 @@ class DataHandler:
 
     def make_dataset(
             self, data, group, label=None, condition=None, transform=False,
-            sampling_mode="random", target_sampling_mode="paired"
+            sampling_mode="random", target_sampling_mode="paired",
+            histogram_preprocessor=None
             ):
         """
         make dataset for training and testing
@@ -696,6 +740,8 @@ class DataHandler:
             ds_args["label"] = label
         if condition is not None:
             ds_args["condition"] = condition
+        if histogram_preprocessor is not None:
+            ds_args["histogram_preprocessor"] = histogram_preprocessor
         if transform is not None:
             ds_args["transform"] = transform
         ds_args["sampling_mode"] = sampling_mode

@@ -36,7 +36,38 @@ checkpoint, seed, probe hyperparameters, threshold, or a new loss. Do not pick
 the best seed. The current main artifact is deterministic full-group posterior
 mean `mu` from all three fixed seeds.
 
-Next one theme: prepare reproducible figures/tables and latent exports from the
-existing finalized artifacts. Any abundance/rate, tail-sensitive, OT,
-supervised, one-class, or prior-generation study starts a new development
-cycle with new validation data.
+Raw-space visualization is now implemented. `Histogram.get_bin_edges("raw")`
+inverts log1p bin geometry; `HistVAE.check_data()` and
+`HistVAE.plot_reconstruction()` default to raw coordinates. For probability
+mass on unequal raw-width bins, `plot_value_mode="auto"` displays raw-space
+density while forward KL remains computed in model mass space. The sampled
+reconstruction mode uses an explicit seed and a full-group target. Focused
+visualization tests passed 8/8, and the full suite including slow tests passed
+65/65.
+
+Train-fitted preprocessing is now a reusable API for future datasets:
+
+```text
+AxisPreprocessingSpec
+HistogramPreprocessor.fit(train_data, train_group)
+HistVAE(..., histogram_preprocessor=preprocessor)
+HistVAE.prep_data(...)
+```
+
+Transforms are explicit per axis (`none` or `log1p`). Lower and upper bounds
+can independently be fixed or fitted as training quantiles. Percentiles can
+weight events equally or give each biological group equal total weight. The
+new path permits only `clip` or `error`, persists safe-YAML state and hashes,
+and reuses the same fitted object on validation/holdout. Constructor injection
+is the canonical path because the fitted state replaces stale default geometry
+before model-contract validation. Do not refit it on validation or holdout. The
+actual-data smoke fitted a group-equal q0.999 upper bound of 97,626 and produced
+finite 64-bin simplex tensors. The finalized FITC checkpoints retain their
+original 0-to-100,000 log1p/clip contract and are not reopened by this
+implementation.
+
+Next one theme: generate the final descriptive reconstruction figures and
+three-seed latent exports from the frozen artifacts. Do not use visual quality
+on the finalized holdout to select a seed or alter the model. Any
+abundance/rate, tail-sensitive, OT, supervised, one-class, or prior-generation
+study starts a new development cycle with new validation data.

@@ -32,15 +32,46 @@ Updated: 2026-06-21
 - Confirmed on holdout that all four latent dimensions remain active, every
   sample beats the train-mean distribution baseline, random views retain
   sample identity, and latent distances preserve input W1 geometry.
+- Added a single coordinate-aware visualization implementation for 1D and 2D
+  histograms and reconstructions.
+- Added raw and transformed bin-edge export, inverse-log1p raw coordinates,
+  raw-coordinate density conversion for probability masses, and reproducible
+  full/sampled reconstruction diagnostics.
+- Updated `check_data()` and the new `plot_reconstruction()` high-level API to
+  use raw coordinates by default.
+- Added `AxisPreprocessingSpec` and a train-fitted `HistogramPreprocessor`.
+- Added explicit per-axis `none`/`log1p`, independent fixed/quantile lower and
+  upper bounds, pooled-event or group-equal quantile weighting, and strict
+  `clip`/`error` tail policies.
+- Added nonzero raw lower bounds and per-axis transforms to the reusable
+  histogram and visualization geometry.
+- Added safe-YAML preprocessing state, state hashes, train/test tail
+  diagnostics, and strict reuse through `HistVAE.prep_data()`.
+- Kept legacy drop behavior outside the fitted preprocessor for backward
+  compatibility while preventing drop-and-renormalize in the new contract.
 
 ## Verification
 
-Implementation verification before the final experiments:
+Implementation verification after the raw-space visualization update:
 
 ```text
-full pytest including slow tests: 57 passed
+raw-space visualization focused tests: 8 passed
+full pytest including slow tests: 65 passed
+actual-data raw-axis smoke: 0 to 100,000 FITC_Sum; density integral ~1
 latent-KL schedule focused tests: 10 passed
 simplex output verified in 1D, 2D, and 3D
+```
+
+Train-fitted preprocessing verification:
+
+```text
+focused HistogramPreprocessor tests: 10 passed
+regular full pytest:                  70 passed, 5 skipped
+full pytest including slow tests:    75 passed
+actual-data smoke:                    519,118 rows; 94 train / 20 validation groups
+fitted group-equal q0.999 upper:      97,626 FITC_Sum
+train / validation upper-tail rate:  0.1065% / 0.0660%
+train, validation, reconstruction:    finite simplex tensors of shape (*, 1, 64)
 ```
 
 Final selected validation result:
@@ -68,8 +99,8 @@ secondary probability-ensemble AUC: 0.774
 ## Next
 
 - Freeze and document the selected configuration and exact checkpoint hashes.
-- Generate figures and tables from the finalized artifacts without selecting a
-  seed or changing the model.
+- Generate raw-space figures and tables from the finalized artifacts without
+  selecting a seed or changing the model.
 - Export the three fixed-seed `mu` representations with explicit seed and
   split provenance.
 - Use a new development protocol or independent cohort before testing any new

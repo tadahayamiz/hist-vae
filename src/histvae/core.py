@@ -13,7 +13,6 @@ import torch.optim as optim
 import numpy as np
 import pandas as pd
 import os, yaml
-from matplotlib import pyplot as plt
 from datetime import datetime
 
 from .models import (
@@ -25,7 +24,6 @@ from .models import (
 from .trainer import FineTuner, PreTrainer, validate_latent_kl_schedule
 from .data_handler import (
     DataHandler,
-    plot_hist,
     validate_histogram_mode,
     validate_out_of_range_policy,
     validate_sampling_mode,
@@ -33,10 +31,66 @@ from .data_handler import (
     validate_condition_array,
     validate_value_transform,
 )
+from .preprocessing import (
+    HistogramPreprocessor,
+    compress_axis_setting,
+    normalize_bins,
+    normalize_range_values,
+    normalize_value_transforms,
+)
 from .utils import fix_seed
+from .visualization import (
+    plot_hist as plot_histogram_grid,
+    plot_reconstruction as plot_reconstruction_grid,
+    plot_scatter as plot_scatter_grid,
+)
 
 
 OPTIMIZERS = ("radam_schedule_free", "radam")
+RECONSTRUCTION_INPUT_MODES = ("full", "sampled")
+PLOT_VALUE_MODES = ("auto", "bin_value", "density")
+
+
+def validate_reconstruction_input_mode(input_mode):
+    if input_mode not in RECONSTRUCTION_INPUT_MODES:
+        raise ValueError(
+            f"Unsupported input_mode: {input_mode!r}. "
+            "Use 'full' or 'sampled'."
+        )
+    return input_mode
+
+
+def resolve_plot_value_mode(dataset, coordinate_space, plot_value_mode):
+    if plot_value_mode not in PLOT_VALUE_MODES:
+        raise ValueError(
+            f"Unsupported plot_value_mode: {plot_value_mode!r}. "
+            "Use 'auto', 'bin_value', or 'density'."
+        )
+    if plot_value_mode != "auto":
+        return plot_value_mode
+    if (
+            coordinate_space == "raw"
+            and dataset.histogram_mode == "probability_mass"
+            ):
+        return "density"
+    return "bin_value"
+
+
+def _forward_kl_per_sample(target, reconstruction):
+    target_flat = np.asarray(target, dtype=np.float64).reshape(len(target), -1)
+    reconstruction_flat = np.asarray(
+        reconstruction, dtype=np.float64
+    ).reshape(len(reconstruction), -1)
+    if target_flat.shape != reconstruction_flat.shape:
+        raise ValueError("target and reconstruction shapes must match.")
+    positive = target_flat > 0
+    terms = np.zeros_like(target_flat)
+    eps = np.finfo(np.float64).eps
+    terms[positive] = target_flat[positive] * (
+        np.log(target_flat[positive])
+        - np.log(np.clip(reconstruction_flat[positive], eps, None))
+    )
+    return terms.sum(axis=1)
 
 
 def validate_optimizer(optimizer_name):
@@ -105,20 +159,72 @@ def make_optimizer(parameters, config):
 
 class HistVAE:
     def __init__(
-            self, config: dict=None, outdir: str=None, exp_name: str=None, seed: int=42
+            self, config: dict=None, outdir: str=None, exp_name: str=None,
+            seed: int=42, histogram_preprocessor=None
             ):
         # arguments
         assert config is not None, "!! config must be given !!"
         self.config = config
+        self.config["in_dims"] = int(self.config["in_dims"])
+        dimension = self.config["in_dims"]
+
+        serialized_state = self.config.get("histogram_preprocessor_state")
+        serialized_preprocessor = (
+            None
+            if serialized_state is None
+            else HistogramPreprocessor.from_state_dict(serialized_state)
+        )
+        if histogram_preprocessor is not None:
+            if not isinstance(histogram_preprocessor, HistogramPreprocessor):
+                raise TypeError(
+                    "histogram_preprocessor must be a HistogramPreprocessor."
+                )
+            histogram_preprocessor.require_fitted()
+            if (
+                    serialized_preprocessor is not None
+                    and serialized_preprocessor.state_sha256
+                    != histogram_preprocessor.state_sha256
+                    ):
+                raise ValueError(
+                    "The constructor histogram_preprocessor differs from the "
+                    "serialized config state."
+                )
+            resolved_preprocessor = histogram_preprocessor
+        else:
+            resolved_preprocessor = serialized_preprocessor
+        if resolved_preprocessor is not None:
+            if resolved_preprocessor.dimension != dimension:
+                raise ValueError(
+                    "histogram_preprocessor dimensions must equal config in_dims."
+                )
+            self.config.update(resolved_preprocessor.config_overrides())
+
+        bins_per_dim = normalize_bins(self.config["bins"], dimension)
+        self.config["bins"] = compress_axis_setting(bins_per_dim)
+        self._pending_histogram_geometry = {}
+        self.config["min_vals"] = self._normalize_initial_range(
+            self.config.get("min_vals"), dimension, "min_vals", default=0.0
+        )
+        self.config["max_vals"] = self._normalize_initial_range(
+            self.config.get("max_vals"), dimension, "max_vals"
+        )
+        if not self._pending_histogram_geometry:
+            if self.config["max_vals"] is not None and np.any(
+                    np.asarray(self.config["max_vals"])
+                    <= np.asarray(self.config["min_vals"])
+                    ):
+                raise ValueError("max_vals must exceed min_vals on every axis.")
         self.config["histogram_mode"] = validate_histogram_mode(
             self.config.get("histogram_mode", "count")
             )
         self.config["out_of_range_policy"] = validate_out_of_range_policy(
             self.config.get("out_of_range_policy", "drop")
             )
-        self.config["value_transform"] = validate_value_transform(
-            self.config.get("value_transform", "none")
+        self.config["value_transform"] = compress_axis_setting(
+            normalize_value_transforms(
+                self.config.get("value_transform", "none"), dimension
             )
+        )
         self.config["train_sampling_mode"] = validate_sampling_mode(
             self.config.get("train_sampling_mode", "random")
             )
@@ -161,6 +267,7 @@ class HistVAE:
         self.test_loader = None
         self.train_lut = None
         self.test_lut = None
+        self.histogram_preprocessor = resolved_preprocessor
         self.model = None
         self.trainer = None
         self.optimizer = None
@@ -173,8 +280,57 @@ class HistVAE:
         if exp_name is None:
             exp_name = f"exp-{datetime.today().strftime('%y%m%d')}"
         self.config["exp_name"] = exp_name
-        tmp = [self.config["in_channels"]] + [self.config["bins"]] * (self.config["in_dims"])
+        bins_per_dim = normalize_bins(self.config["bins"], self.config["in_dims"])
+        tmp = [self.config["in_channels"], *bins_per_dim]
         self.config["input_shape"] = tmp # hard coded for ConvVAE
+
+
+    def _normalize_initial_range(self, values, dimension, name, default=None):
+        """Normalize compatible bounds while allowing a later preprocessor.
+
+        Packaged defaults describe the default dimensionality.  A caller may
+        change ``in_dims`` and then provide a fitted HistogramPreprocessor in
+        :meth:`prep_data`; stale default bounds must not prevent that explicit
+        source of truth from being applied.  Without a preprocessor, the same
+        mismatch is rejected before dataset construction.
+        """
+        if values is None:
+            if default is None:
+                return None
+            return [float(default)] * dimension
+        candidate = np.asarray(values, dtype=np.float64)
+        if candidate.shape != (dimension,):
+            self._pending_histogram_geometry[name] = {
+                "expected_dimension": dimension,
+                "observed_shape": list(candidate.shape),
+            }
+            return candidate.tolist()
+        if not np.all(np.isfinite(candidate)):
+            raise ValueError(f"{name} must contain finite values.")
+        return candidate.tolist()
+
+
+    def _apply_histogram_preprocessor(self, preprocessor):
+        """Use one fitted preprocessor as the histogram source of truth."""
+        if not isinstance(preprocessor, HistogramPreprocessor):
+            raise TypeError(
+                "histogram_preprocessor must be a HistogramPreprocessor."
+            )
+        preprocessor.require_fitted()
+        if preprocessor.dimension != self.config["in_dims"]:
+            raise ValueError(
+                "histogram_preprocessor dimensions must equal config in_dims."
+            )
+        self.config.update(preprocessor.config_overrides())
+        self._pending_histogram_geometry = {}
+        validate_grouped_measure_contract(self.config)
+        bins_per_dim = normalize_bins(
+            self.config["bins"], self.config["in_dims"]
+        )
+        self.config["input_shape"] = [
+            self.config["in_channels"], *bins_per_dim
+        ]
+        self.histogram_preprocessor = preprocessor
 
 
     def prep_data(
@@ -185,7 +341,8 @@ class HistVAE:
             histogram_mode=None, out_of_range_policy=None,
             value_transform=None, train_sampling_mode=None,
             test_sampling_mode=None, train_target_sampling_mode=None,
-            test_target_sampling_mode=None, condition_mode=None
+            test_target_sampling_mode=None, condition_mode=None,
+            histogram_preprocessor=None
             ):
         """Prepare grouped point data as histograms.
 
@@ -218,7 +375,44 @@ class HistVAE:
             ``"paired"`` preserves the independent sampled target used by the
             legacy denoising path. ``"full"`` uses the deterministic full-group
             histogram as the reconstruction target.
+
+        histogram_preprocessor: HistogramPreprocessor, optional
+            Fitted training-data preprocessing contract. Bounds, transforms,
+            tail handling, bin counts, and histogram mode are applied unchanged
+            to train and test data and serialized into the experiment config.
+            Runtime histogram overrides must be omitted when this is supplied.
+            Passing it to the HistVAE constructor is preferred because the
+            fitted state then replaces default geometry before model-contract
+            validation.
         """
+        histogram_overrides = {
+            "histogram_mode": histogram_mode,
+            "out_of_range_policy": out_of_range_policy,
+            "value_transform": value_transform,
+        }
+        if histogram_preprocessor is not None:
+            if any(value is not None for value in histogram_overrides.values()):
+                raise ValueError(
+                    "Histogram runtime overrides must be omitted when "
+                    "histogram_preprocessor is supplied."
+                )
+            if self.histogram_preprocessor is not None and (
+                    self.histogram_preprocessor.state_sha256
+                    != histogram_preprocessor.state_sha256
+                    ):
+                raise ValueError(
+                    "The supplied histogram_preprocessor differs from the "
+                    "state already recorded in this HistVAE instance."
+                )
+            self._apply_histogram_preprocessor(histogram_preprocessor)
+        elif self.histogram_preprocessor is not None and any(
+                value is not None for value in histogram_overrides.values()
+                ):
+            raise ValueError(
+                "Histogram runtime overrides cannot replace the serialized "
+                "histogram_preprocessor state."
+            )
+
         if histogram_mode is not None:
             self.config["histogram_mode"] = validate_histogram_mode(histogram_mode)
         if out_of_range_policy is not None:
@@ -226,8 +420,10 @@ class HistVAE:
                 out_of_range_policy
             )
         if value_transform is not None:
-            self.config["value_transform"] = validate_value_transform(
-                value_transform
+            self.config["value_transform"] = compress_axis_setting(
+                normalize_value_transforms(
+                    value_transform, self.config["in_dims"]
+                )
             )
         if condition_mode is not None:
             self.config["condition_mode"] = validate_condition_mode(
@@ -300,12 +496,58 @@ class HistVAE:
                     train_condition = condition_array
                 else:
                     test_condition = condition_array
+
+        if train_data is None or train_group is None:
+            raise ValueError("train_data and train_group are required.")
+        train_data = np.asarray(train_data)
+        if train_data.ndim == 1:
+            train_data = train_data.reshape(-1, 1)
+        if train_data.ndim != 2 or train_data.shape[1] != self.config["in_dims"]:
+            raise ValueError(
+                "train_data dimensions must match config in_dims."
+            )
+        if test_data is not None:
+            test_data = np.asarray(test_data)
+            if test_data.ndim == 1:
+                test_data = test_data.reshape(-1, 1)
+            if test_data.ndim != 2 or test_data.shape[1] != self.config["in_dims"]:
+                raise ValueError(
+                    "test_data dimensions must match config in_dims."
+                )
+
+        if self.histogram_preprocessor is None and self._pending_histogram_geometry:
+            details = ", ".join(
+                f"{name}: expected {item['expected_dimension']} value(s), "
+                f"got shape {tuple(item['observed_shape'])}"
+                for name, item in self._pending_histogram_geometry.items()
+            )
+            raise ValueError(
+                "Histogram bounds do not match config in_dims ("
+                f"{details}). Supply matching bounds or a fitted "
+                "histogram_preprocessor."
+            )
+        if self.config.get("max_vals") is None:
+            raise ValueError(
+                "max_vals must be configured or supplied by a fitted "
+                "histogram_preprocessor."
+            )
+
+        if self.histogram_preprocessor is not None:
+            diagnostics = {
+                "train": self.histogram_preprocessor.diagnose(train_data),
+            }
+            if test_data is not None:
+                diagnostics["test"] = self.histogram_preprocessor.diagnose(
+                    test_data
+                )
+            self.config["histogram_preprocessor_diagnostics"] = diagnostics
         # dataset
         self.train_dataset = self.data_handler.make_dataset(
             data=train_data, group=train_group, label=train_label,
             condition=train_condition, transform=train_transform,
             sampling_mode=train_sampling_mode,
             target_sampling_mode=train_target_sampling_mode,
+            histogram_preprocessor=self.histogram_preprocessor,
             )
         if test_data is not None:
             self.test_dataset = self.data_handler.make_dataset(
@@ -313,6 +555,7 @@ class HistVAE:
                 condition=test_condition, transform=test_transform,
                 sampling_mode=test_sampling_mode,
                 target_sampling_mode=test_target_sampling_mode,
+                histogram_preprocessor=self.histogram_preprocessor,
                 )
         # dataloader
         self.train_loader = self.data_handler.make_dataloader(
@@ -446,39 +689,265 @@ class HistVAE:
         return np.vstack(reps)
 
 
-    def check_data(self, dataset, indices:list=[], output:str="", **plot_params):
-        """
-        check data
-        
+    def get_reconstruction(
+            self, dataset=None, indices=None, input_mode="full", random_seed=0
+            ):
+        """Return deterministic decoder reconstructions for grouped histograms.
+
         Parameters
         ----------
-        dataset: torch.utils.data.Dataset
-            the PHTwins dataset
+        dataset: PointHistDataset, optional
+            Dataset to evaluate. The test dataset is used by default, falling
+            back to the train dataset.
+        indices: sequence of int, optional
+            Dataset indices. All groups are used when omitted.
+        input_mode: {"full", "sampled"}
+            ``"full"`` uses the deterministic full-group histogram.
+            ``"sampled"`` draws one unaugmented ``num_points`` histogram and
+            retains the full-group histogram as the visualization target.
+        random_seed: int
+            Seed for ``input_mode="sampled"``.
 
-        indices: list
-            the list of indices to be checked
-
-        output: str
-            the output path
-
-        plot_params: dict
-            the parameters for the plot
-            default_params = {
-                "nrow": 1,
-                "ncol": 3,
-                "xlabel": "x",
-                "ylabel": "y",
-                "title_list": None,
-                "cmap": "viridis",
-                "aspect": "equal",
-                "color": "royalblue",
-                "alpha": 0.7
-            }
-        
+        Returns
+        -------
+        dict
+            Indices, group identifiers, target, model input, reconstruction,
+            posterior mean, and posterior log variance.
         """
-        # plot the deterministic model-input histogram
-        hist_list = [dataset.get_full_histogram(i).numpy()[0] for i in indices]
-        plot_hist(hist_list, output, **plot_params)
+        if self.model is None:
+            raise ValueError("!! fit or load_model first !!")
+        if dataset is None:
+            dataset = (
+                self.test_dataset
+                if self.test_dataset is not None
+                else self.train_dataset
+            )
+        if dataset is None:
+            raise ValueError("A prepared dataset is required.")
+        input_mode = validate_reconstruction_input_mode(input_mode)
+
+        if indices is None:
+            indices = list(range(len(dataset)))
+        else:
+            indices = [int(index) for index in indices]
+        if not indices:
+            raise ValueError("indices must contain at least one dataset index.")
+        if any(index < 0 or index >= len(dataset) for index in indices):
+            raise IndexError("indices contains an out-of-range dataset index.")
+
+        rng = np.random.default_rng(random_seed)
+        targets = []
+        inputs = []
+        reconstructions = []
+        means = []
+        logvars = []
+        groups = []
+        model_device = next(self.model.parameters()).device
+
+        self.model.eval()
+        with torch.inference_mode():
+            for index in indices:
+                target = dataset.get_full_histogram(index)
+                if input_mode == "full":
+                    model_input = target.clone()
+                else:
+                    model_input = dataset.get_sampled_histogram(index, rng=rng)
+
+                condition = dataset.get_group_condition(index)
+                if condition is not None:
+                    condition = condition.to(model_device).unsqueeze(0)
+
+                outputs = self.model(
+                    model_input.to(model_device).unsqueeze(0),
+                    sample_latent=False,
+                    condition=condition,
+                )
+                if not isinstance(outputs, tuple):
+                    raise RuntimeError("Model output must be a tuple.")
+                if len(outputs) == 3:
+                    reconstruction, mean, logvar = outputs
+                elif len(outputs) == 4:
+                    _, reconstruction, mean, logvar = outputs
+                else:
+                    raise RuntimeError(
+                        "Expected pretraining or fine-tuning model output."
+                    )
+
+                targets.append(target.cpu().numpy())
+                inputs.append(model_input.cpu().numpy())
+                reconstructions.append(reconstruction.squeeze(0).cpu().numpy())
+                means.append(mean.squeeze(0).cpu().numpy())
+                logvars.append(logvar.squeeze(0).cpu().numpy())
+                groups.append(dataset.idx2group[index])
+
+        return {
+            "indices": np.asarray(indices, dtype=np.int64),
+            "groups": np.asarray(groups),
+            "target": np.stack(targets),
+            "input": np.stack(inputs),
+            "reconstruction": np.stack(reconstructions),
+            "mu": np.stack(means),
+            "logvar": np.stack(logvars),
+            "input_mode": input_mode,
+        }
+
+
+    def plot_reconstruction(
+            self, dataset=None, indices=None, input_mode="full", random_seed=0,
+            coordinate_space="raw", plot_value_mode="auto", output="",
+            show=False, close=True, **plot_params
+            ):
+        """Plot target and deterministic reconstruction in explicit coordinates.
+
+        Raw coordinate space is the default. For probability-mass histograms
+        built with log1p-spaced bins, ``plot_value_mode="auto"`` converts bin
+        mass to density per raw-space width or area. This avoids displaying
+        transformed coordinates or treating unequal raw-width bins as equal.
+
+        Returns
+        -------
+        result, figure, axes
+            Reconstruction arrays and the Matplotlib objects.
+        """
+        if dataset is None:
+            dataset = (
+                self.test_dataset
+                if self.test_dataset is not None
+                else self.train_dataset
+            )
+        if dataset is None:
+            raise ValueError("A prepared dataset is required.")
+
+        result = self.get_reconstruction(
+            dataset=dataset,
+            indices=indices,
+            input_mode=input_mode,
+            random_seed=random_seed,
+        )
+        value_mode = resolve_plot_value_mode(
+            dataset, coordinate_space, plot_value_mode
+        )
+        bin_edges = dataset.get_bin_edges(coordinate_space=coordinate_space)
+
+        if "axis_labels" not in plot_params:
+            plot_params["axis_labels"] = [
+                f"raw dimension {axis + 1}"
+                if coordinate_space == "raw"
+                else f"transformed dimension {axis + 1}"
+                for axis in range(dataset.ndim)
+            ]
+        if "value_label" not in plot_params:
+            if value_mode == "density":
+                plot_params["value_label"] = (
+                    "probability density per raw unit"
+                    if coordinate_space == "raw"
+                    else "probability density per transformed unit"
+                )
+            elif dataset.histogram_mode == "probability_mass":
+                plot_params["value_label"] = "probability mass per bin"
+            else:
+                plot_params["value_label"] = "stored histogram value"
+
+        metric_values = None
+        metric_name = None
+        if (
+                dataset.histogram_mode == "probability_mass"
+                and self.config.get("reconstruction_loss") == "forward_kl"
+                ):
+            metric_values = _forward_kl_per_sample(
+                result["target"], result["reconstruction"]
+            )
+            metric_name = "forward KL"
+
+        figure, axes = plot_reconstruction_grid(
+            target=result["target"],
+            reconstruction=result["reconstruction"],
+            input_hist=(result["input"] if input_mode == "sampled" else None),
+            bin_edges=bin_edges,
+            value_mode=value_mode,
+            group_labels=result["groups"],
+            metric_values=metric_values,
+            metric_name=metric_name,
+            output=output,
+            show=show,
+            close=close,
+            **plot_params,
+        )
+        result["coordinate_space"] = coordinate_space
+        result["plot_value_mode"] = value_mode
+        result["bin_edges"] = bin_edges
+        result["metric_name"] = metric_name
+        result["metric_values"] = metric_values
+        return result, figure, axes
+
+
+    def check_data(
+            self, dataset, indices=None, output="", coordinate_space="raw",
+            plot_value_mode="auto", **plot_params
+            ):
+        """Plot deterministic full-group histograms in explicit coordinates.
+
+        Raw coordinates are used by default. Probability-mass histograms with
+        unequal raw-width bins are displayed as raw-coordinate density when
+        ``plot_value_mode="auto"``.
+        """
+        if indices is None or len(indices) == 0:
+            indices = list(range(len(dataset)))
+        else:
+            indices = [int(index) for index in indices]
+        if any(index < 0 or index >= len(dataset) for index in indices):
+            raise IndexError("indices contains an out-of-range dataset index.")
+
+        hist_list = [
+            dataset.get_full_histogram(index).numpy()[0]
+            for index in indices
+        ]
+        value_mode = resolve_plot_value_mode(
+            dataset, coordinate_space, plot_value_mode
+        )
+        bin_edges = dataset.get_bin_edges(coordinate_space=coordinate_space)
+        coordinate_prefix = (
+            "raw" if coordinate_space == "raw" else "transformed"
+        )
+        plot_params.setdefault(
+            "title_list", [str(dataset.idx2group[index]) for index in indices]
+        )
+        plot_params.setdefault("xlabel", f"{coordinate_prefix} dimension 1")
+        if dataset.ndim == 1:
+            if value_mode == "density":
+                plot_params.setdefault(
+                    "ylabel",
+                    (
+                        "probability density per raw unit"
+                        if coordinate_space == "raw"
+                        else "probability density per transformed unit"
+                    ),
+                )
+            elif dataset.histogram_mode == "probability_mass":
+                plot_params.setdefault("ylabel", "probability mass per bin")
+            else:
+                plot_params.setdefault("ylabel", "stored histogram value")
+        else:
+            plot_params.setdefault("ylabel", f"{coordinate_prefix} dimension 2")
+            plot_params.setdefault(
+                "colorbar_label",
+                (
+                    (
+                        "probability density per raw area"
+                        if coordinate_space == "raw"
+                        else "probability density per transformed area"
+                    )
+                    if value_mode == "density"
+                    else "histogram value"
+                ),
+            )
+        return plot_histogram_grid(
+            hist_list,
+            output=output,
+            bin_edges=bin_edges,
+            value_mode=value_mode,
+            **plot_params,
+        )
 
 
     def qual_eval(self, dataset, query_indices, outdir:str=""):
@@ -719,129 +1188,15 @@ def calc_hist(X, bins=16, histogram_mode="count", value_transform="none"):
     return hist
 
 
-def plot_hist(hist_list, output="", show: bool=False, **plot_params):
-    """
-    Plot histograms (1D, 2D).
-
-    Parameters:
-    ----------
-    hist_list : list of np.ndarray
-        List of histograms to plot.
-
-    output : str, optional
-        File path to save the plot (default: "", meaning no save).
-
-    **plot_params : dict, optional
-        Dictionary containing plot customization options:
-            - xlabel (str): Label for x-axis
-            - ylabel (str): Label for y-axis
-            - title_list (list of str): Titles for each subplot
-            - cmap (str): Colormap for 2D histograms
-            - aspect (str): Aspect ratio for 2D histograms (default: 'equal')
-            - color (str): Bar color for 1D histograms (default: 'royalblue')
-            - alpha (float): Transparency for 1D histograms (default: 0.7)
-    """
-    # Default plot parameters
-    default_params = {
-        "nrow": 1,
-        "ncol": 3,
-        "xlabel": "x",
-        "ylabel": "y",
-        "title_list": None,
-        "cmap": "viridis",
-        "aspect": "equal",
-        "color": "royalblue",
-        "alpha": 0.7
-    }
-    # merge default and custom params
-    params = {**default_params, **plot_params}
-    num_plots = len(hist_list)
-    nrow, ncol = params["nrow"], params["ncol"]
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5 * ncol, 5 * nrow))
-    axes = np.atleast_1d(axes).flatten()  # Flatten for easy iteration
-    for i, hist in enumerate(hist_list):
-        ax = axes[i]
-        dim = hist.ndim  # Detect dimensionality
-        if dim == 1:
-            ax.bar(range(len(hist)), hist, width=0.8, color=params["color"], alpha=params["alpha"])
-            ax.set_xlabel(params["xlabel"])
-            ax.set_ylabel(params["ylabel"])
-            ax.set_title(params["title_list"][i] if params["title_list"] else f'1D Histogram {i+1}')
-        elif dim == 2:
-            im = ax.imshow(hist.T, origin='lower', cmap=params["cmap"], aspect=params["aspect"])
-            fig.colorbar(im, ax=ax, label=params["ylabel"])
-            ax.set_xlabel(params["xlabel"])
-            ax.set_ylabel(params["ylabel"])
-            ax.set_title(params["title_list"][i] if params["title_list"] else f'2D Histogram {i+1}')
-        else:
-            raise NotImplementedError("Only 1D and 2D histograms are supported.")
-    # Remove unused subplots
-    for j in range(num_plots, len(axes)):
-        fig.delaxes(axes[j])
-    plt.tight_layout()
-    if output:
-        plt.savefig(output)
-    if show:
-        plt.show()
-    plt.close()
+def plot_hist(hist_list, output="", show=False, **plot_params):
+    """Compatibility wrapper for :func:`histvae.visualization.plot_hist`."""
+    return plot_histogram_grid(
+        hist_list, output=output, show=show, **plot_params
+    )
 
 
-def plot_scatter(points_list, output="", show: bool=False, **plot_params):
-    """
-    Plot scatter plots from list of 2D point arrays.
-
-    Parameters
-    ----------
-    points_list : list of np.ndarray
-        List of 2D point arrays (each of shape (N, 2)).
-
-    output : str, optional
-        File path to save the plot (default: "", meaning no save).
-
-    **plot_params : dict, optional
-        Plot customization options:
-            - xlabel (str): Label for x-axis
-            - ylabel (str): Label for y-axis
-            - title_list (list of str): Titles for each subplot
-            - color (str): Point color (default: 'royalblue')
-            - alpha (float): Point transparency (default: 0.7)
-            - s (float): Point size (default: 10)
-            - nrow (int): Number of rows in subplot grid
-            - ncol (int): Number of columns in subplot grid
-    """
-    # Default parameters
-    default_params = {
-        "nrow": 1,
-        "ncol": 3,
-        "xlabel": "x",
-        "ylabel": "y",
-        "title_list": None,
-        "color": "royalblue",
-        "alpha": 0.7,
-        "s": 10
-    }
-    params = {**default_params, **plot_params}
-    num_plots = len(points_list)
-    nrow, ncol = params["nrow"], params["ncol"]
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5 * ncol, 5 * nrow))
-    axes = np.atleast_1d(axes).flatten()  # Flatten to 1D array for iteration
-    for i, points in enumerate(points_list):
-        ax = axes[i]
-        if points.ndim != 2 or points.shape[1] != 2:
-            raise ValueError(f"Expected shape (N, 2), got {points.shape}")
-        ax.scatter(points[:, 0], points[:, 1],
-                   color=params["color"],
-                   alpha=params["alpha"],
-                   s=params["s"])
-        ax.set_xlabel(params["xlabel"])
-        ax.set_ylabel(params["ylabel"])
-        ax.set_title(params["title_list"][i] if params["title_list"] else f'Scatter {i+1}')
-        ax.grid(True)
-    # Remove any unused subplots
-    for j in range(num_plots, len(axes)):
-        fig.delaxes(axes[j])
-    plt.tight_layout()
-    if output:
-        plt.savefig(output)
-    plt.show()
-    plt.close()
+def plot_scatter(points_list, output="", show=False, **plot_params):
+    """Compatibility wrapper for :func:`histvae.visualization.plot_scatter`."""
+    return plot_scatter_grid(
+        points_list, output=output, show=show, **plot_params
+    )

@@ -118,6 +118,8 @@ batch correction, or clinical diagnostic performance.
 - `R-260620-01`: grouped-measure representation contract
 - `R-260620-02`: latent-KL schedule contract
 - `R-260621-00`: selected mainline and interpretation
+- `R-260621-01`: raw-space histogram and reconstruction visualization
+- `R-260621-02`: train-fitted histogram preprocessing
 
 ## Active evidence
 
@@ -132,9 +134,22 @@ batch correction, or clinical diagnostic performance.
 
 ## Next action
 
-Freeze the current shape-only model and artifact chain. The next work should be
-reporting, visualization, and reproducible export of the three fixed-seed
-latents without further use of the finalized holdout for selection.
+Freeze the current shape-only model and artifact chain. Raw-space histogram
+and reconstruction visualization is implemented, including inverse log1p bin
+edges and raw-coordinate density for probability-mass plots.
+
+For future datasets and new development cycles, use the train-fitted
+`HistogramPreprocessor` contract rather than fitting ranges in notebook code.
+Pass it to the `HistVAE` constructor so its state becomes authoritative before
+model-contract validation. It makes log scaling optional per axis, supports
+fixed or percentile bounds, can weight percentiles equally by biological
+group, records tail fractions, and reuses the exact fitted state on validation
+and holdout data. This new API does not reopen or alter the finalized FITC
+model.
+
+The next reporting work should generate reproducible figures and fixed-seed
+latent exports from the finalized artifacts without further use of the
+holdout for selection.
 
 Any abundance/rate branch, tail-sensitive objective, OT auxiliary loss,
 supervised disease head, or one-class model is a new development theme and
