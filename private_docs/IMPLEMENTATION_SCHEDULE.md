@@ -1,6 +1,6 @@
 # Implementation Schedule
 
-Updated: 2026-06-20
+Updated: 2026-06-21
 
 ## Done
 
@@ -19,50 +19,71 @@ Updated: 2026-06-20
 - Rejected legacy histogram-value augmentation for probability-mass inputs.
 - Added optional decoder-only generic numeric conditioning with strict
   group-level constant vectors and no encoder access to conditions.
-- Assigned categorical encoding, unknown-category checks, and scaling to the
-  experiment layer so the reusable model remains assay-independent.
 - Corrected two-dimensional histogram axis ordering.
-- Added focused grouped-measure and conditioning tests.
-- Recorded the failed legacy sigmoid probability-mass pilot and the new
-  implementation smoke.
-- Cleared the reconstruction-first gate on the attached data: validation
-  forward KL improved from the train-mean baseline `0.06056` to `0.02285` with
-  `beta=0`.
 - Added strict constant and linear-warmup latent-KL schedules, per-epoch beta
   logging, and beta provenance in best/last checkpoints.
-- Verified a 50-epoch `beta=1e-4` warmup smoke with all four latent dimensions
-  active and validation forward KL `0.02128`.
+- Cleared the reconstruction-first gate on the attached data.
+- Completed the 3-seed beta convergence study with a 300-epoch ceiling and
+  selected `beta=1e-4` by the predefined gate.
+- Completed decoder-conditioning ablation and selected
+  `condition_mode=none`.
+- Performed the one-time fixed-seed holdout evaluation and wrote a finalized
+  artifact chain.
+- Confirmed on holdout that all four latent dimensions remain active, every
+  sample beats the train-mean distribution baseline, random views retain
+  sample identity, and latent distances preserve input W1 geometry.
 
 ## Verification
 
-- Full pytest including slow tests: 57 passed
-- Latent-KL schedule focused tests: 10 passed
-- Simplex output verified in 1D, 2D, and 3D
-- Synthetic decoder-conditioned pretraining completed and wrote the canonical
-  best checkpoint
-- Attached-data one-epoch smoke:
-  - 94 train / 20 validation groups
-  - random 1,024-point input / full target
-  - simplex and forward KL
-  - target, input, and reconstruction mass-sum error <= approximately `1.2e-7`
-  - finite training and validation metrics
+Implementation verification before the final experiments:
+
+```text
+full pytest including slow tests: 57 passed
+latent-KL schedule focused tests: 10 passed
+simplex output verified in 1D, 2D, and 3D
+```
+
+Final selected validation result:
+
+```text
+beta: 1e-4
+condition_mode: none
+mean validation forward KL: 0.006772 +/- 0.001440
+active dimensions: 4 / 4 for every seed
+all three seeds early-stopped before the 300-epoch ceiling
+```
+
+Final holdout result:
+
+```text
+mean full-group forward KL:          0.006251 +/- 0.001777
+train-mean baseline:                0.051049
+mean reconstruction improvement:    87.75%
+random-view retrieval:              0.829 +/- 0.027
+input-W1 / latent Spearman:         0.882 +/- 0.053
+fixed linear-probe ROC AUC:         0.734 +/- 0.054
+secondary probability-ensemble AUC: 0.774
+```
 
 ## Next
 
-- Run an unconditioned beta-target grid with at least three seeds.
-- Keep `pretrain_monitor: test_recon` and compare against the fixed train-mean
-  forward-KL baseline.
-- Evaluate same-sample random-view latent stability and between-sample
-  separation for each candidate checkpoint.
-- Run technical-conditioning ablation only after reporting label-by-condition
-  overlap.
+- Freeze and document the selected configuration and exact checkpoint hashes.
+- Generate figures and tables from the finalized artifacts without selecting a
+  seed or changing the model.
+- Export the three fixed-seed `mu` representations with explicit seed and
+  split provenance.
+- Use a new development protocol or independent cohort before testing any new
+  disease-specific objective or model branch.
 
 ## Deferred
 
 - Optional event-mass or exposure-normalized-rate input/output branch
+- Tail-mass summaries or rare-event-aware loss
 - Exact 1D W1 and multidimensional Sinkhorn auxiliary losses
 - Point-coordinate jitter calibrated from technical controls
-- Weak supervised disease head or contrastive disease-specific latent
+- Weak supervised disease head, one-class model, or contrastive
+  disease-specific latent
+- Prior-calibration and unconditional-generation evaluation
 - CLI repair or redesign
 
 ## Temporary shims

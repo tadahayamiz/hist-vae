@@ -1,7 +1,7 @@
 # R-260620-01: Grouped-measure representation contract
 
 Status: active
-Updated: 2026-06-20
+Updated: 2026-06-21
 
 ## 1. Scope
 
@@ -203,3 +203,16 @@ full-group histogram. Evaluation must include:
 ```
 
 Holdout groups remain excluded from model fitting and model selection.
+
+## 9. Empirical selection outcome
+
+The current attached-data selection is recorded in R-260621-00 and
+E-260621-00 through E-260621-02. The selected shape-only configuration uses
+`condition_mode: none`. Decoder-only conditioning remains available for future
+experiments but was rejected for this dataset because it did not consistently
+improve reconstruction or latent geometry and did not reduce measured batch
+signal.
+
+The grouped-measure contract itself remains generic; this empirical selection
+does not remove the optional condition API or imply that conditioning will
+never be useful on a better-balanced experimental design.

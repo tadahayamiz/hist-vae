@@ -1,26 +1,42 @@
 # Next Chat Handoff
 
-Updated: 2026-06-20
+Updated: 2026-06-21
 
-The biological sample remains the explicit grouping unit; acquisition-only
-`slice` values are pooled by `sample_name`. The canonical path is probability
-mass, simplex softmax, forward KL, random input, and deterministic full-group
-target. Optional technical conditioning remains decoder-only and is off in the
-primary run.
+The shape-only grouped-measure mainline is selected and the holdout is
+finalized. Use pooled `sample_name` groups; acquisition `slice` values remain
+QC metadata only.
 
-The reconstruction-first gate has now passed on the attached FITC data. With a
-small `[8, 16]` encoder/decoder, latent dimension 4, and `beta=0`, validation
-forward KL reached `0.02285` versus the train-mean baseline `0.06056`; all four
-latent coordinates were active.
+Frozen configuration:
 
-The repo now implements `latent_kl_schedule: constant | linear_warmup`. Linear
-warmup starts at zero, reaches `beta` at the configured warmup epoch, requires
-`pretrain_monitor: test_recon`, and records the effective beta in history and
-best/last checkpoints. A single-seed `beta=1e-4`, 25-epoch warmup smoke reached
-validation forward KL `0.02128` with 4/4 active coordinates.
+```text
+probability mass + log1p bins + clipping at 100,000
+64 bins; random 1,024-event train input; full-group target/evaluation
+latent dimension 4; hidden dimensions [8, 16]
+simplex-softmax decoder; forward-KL reconstruction
+beta 1e-4 with 25-epoch linear warmup
+300-epoch ceiling; patience 20; RAdam
+condition_mode none
+seeds 17, 42, 73
+```
 
-Next one theme: run a small unconditioned beta grid over at least three seeds
-and evaluate reconstruction, same-sample random-view stability, and
-between-sample separation. Do not add OT, a mass head, supervised labels, or
-adversarial batch removal in the same phase. Decoder conditioning is the
-following separate ablation and requires label-by-condition overlap reporting.
+The beta convergence experiment selected `1e-4`; the decoder-conditioning
+ablation selected `none`. The final 20-group holdout was evaluated once with
+all three fixed seeds. Mean holdout forward KL was `0.006251` versus the
+train-mean baseline `0.051049`; all samples beat the baseline, all four latent
+dimensions were active, random-view retrieval was `0.829`, and input-W1 versus
+latent-distance Spearman was `0.882`.
+
+The fixed disease-label probe gave mean AUC `0.734`; the secondary probability
+average gave AUC `0.774`. Treat this as exploratory because the holdout has only
+six PC samples and the expected disease signal may be sparse rather than a
+clean two-cluster shift.
+
+Do not use the finalized holdout to alter beta, architecture, condition mode,
+checkpoint, seed, probe hyperparameters, threshold, or a new loss. Do not pick
+the best seed. The current main artifact is deterministic full-group posterior
+mean `mu` from all three fixed seeds.
+
+Next one theme: prepare reproducible figures/tables and latent exports from the
+existing finalized artifacts. Any abundance/rate, tail-sensitive, OT,
+supervised, one-class, or prior-generation study starts a new development
+cycle with new validation data.

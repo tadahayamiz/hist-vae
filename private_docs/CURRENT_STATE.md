@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-06-20
+Updated: 2026-06-21
 
 ## Repository identity
 
@@ -11,86 +11,142 @@ VAE.
 
 ## Current objective
 
-Build a generic representation-learning path for biological samples whose
-observations are sets of events, cells, particles, or image-derived spots. The
-latent should describe stable distribution shape and location, while total
-event mass/rate and technical covariates remain explicit optional components.
+The current shape-only mainline is complete for the attached single-molecule
+enzyme-activity dataset. It learns a stable latent representation of each
+sample's empirical distribution while excluding total event abundance and
+technical batch information by default.
 
-The attached single-molecule enzyme assay is the current validation dataset,
-not the definition of the model.
+The attached assay is the validation dataset, not the definition of the model.
+The reusable contract remains applicable to grouped low-dimensional events,
+cells, particles, or image-derived spots.
 
 ## Sample contract
 
 - `group` is the biological sample whose latent representation is required.
 - Acquisition-only partitions such as image `slice` values are merged when
-  they only tile a larger sample area.
+  they tile a larger measured region.
 - For the attached data, all rows with the same `sample_name` form one sample.
-- Partition metadata may be retained for QC but is not a hierarchical encoder
-  input in the mainline.
+- `slice` remains QC or future block-resampling metadata; it is not a separate
+  latent level in the selected model.
 
-## Active mainline
+## Selected mainline
 
-- Legacy `count` and `density` paths remain available with sigmoid/MSE.
-- The grouped empirical-measure path uses:
+```yaml
+histogram_mode: probability_mass
+value_transform: log1p
+out_of_range_policy: clip
+max_vals: [100000.0]
+bins: 64
 
-  ```yaml
-  histogram_mode: probability_mass
-  decoder_output_mode: simplex_softmax
-  reconstruction_loss: forward_kl
-  train_sampling_mode: random
-  train_target_sampling_mode: full
-  eval_sampling_mode: full
-  eval_target_sampling_mode: full
-  transform: false
-  ```
+train_sampling_mode: random
+train_target_sampling_mode: full
+eval_sampling_mode: full
+eval_target_sampling_mode: full
+num_points: 1024
+transform: false
 
-- The simplex decoder supports one-, two-, and three-dimensional histograms and
-  guarantees non-negative reconstructions whose total mass is one.
-- The observation-space forward KL is separate from the usual latent VAE KL.
-- The latent KL supports a strict constant or zero-to-beta linear warmup
-  schedule. Warmup runs are selected by deterministic validation
-  reconstruction rather than changing total loss.
-- Training can reconstruct a deterministic full-sample target from a random
-  finite point subset.
-- Technical conditioning is optional and decoder-only:
-  `condition_mode: none | decoder`. The condition is a generic numeric
-  sample-level vector; categorical batches are encoded outside the model.
-- The encoder and exported latent mean never receive condition vectors.
-- Decoder conditioning is an ablation tool, not a guarantee of deconfounding.
-- Total event mass or exposure-normalized event rate is not yet part of the
-  encoder; this remains a separate future branch.
+latent_dim: 4
+hidden_dims: [8, 16]
+dropout_conv: 0.0
+
+decoder_output_mode: simplex_softmax
+reconstruction_loss: forward_kl
+
+beta: 0.0001
+latent_kl_schedule: linear_warmup
+latent_kl_warmup_epochs: 25
+pretrain_monitor: test_recon
+
+epochs: 300
+patience: 20
+optimizer: radam
+
+condition_mode: none
+condition_dim: 0
+```
+
+The epoch count is a ceiling. The selected three seeds stopped between epochs
+110 and 186 after patience-based early stopping.
+
+Legacy `count` and `density` paths remain available with sigmoid/MSE. Optional
+decoder-only numeric conditioning remains implemented but was not selected for
+the current dataset.
+
+## Final evidence status
+
+The beta and condition mode were selected using train/validation data only.
+The holdout was then evaluated once with all three fixed seeds and finalized.
+
+Across the 20 holdout groups:
+
+```text
+mean full-group forward KL:           0.006251 +/- 0.001777
+train-mean forward-KL baseline:       0.051049
+mean reconstruction improvement:      87.75% +/- 3.48%
+groups beating the baseline:          20 / 20 for every seed
+active latent dimensions:             4 / 4 for every seed
+between/within random-view ratio:      5.146 +/- 0.502
+random-view retrieval accuracy:       0.829 +/- 0.027
+input-W1 / latent-distance Spearman:  0.882 +/- 0.053
+```
+
+The selected model therefore passes the intended sample-representation gate:
+it reconstructs unseen sample distributions, remains stable under finite-event
+subsampling, and preserves much of the input-distribution geometry.
+
+The fixed disease-label probe produced mean ROC AUC `0.734 +/- 0.054`; the
+secondary three-seed probability average produced AUC `0.774`. This is
+exploratory evidence of weak disease-related information, not diagnostic
+validation. The overall C and PC distributions are visually similar, and only
+a subset of PC samples may contain a specific component.
+
+## Model interpretation
+
+The model is non-collapsed and suitable for deterministic sample
+representation via full-group posterior mean `mu`. Because the selected beta
+is small, posterior standard deviations are narrow, and latent KL remains
+substantial, it is best described as a weakly VAE-regularized denoising
+distributional autoencoder.
+
+The current evidence does not establish calibrated posterior uncertainty,
+realistic unconditional generation from the standard-normal prior, causal
+batch correction, or clinical diagnostic performance.
 
 ## Active references
 
 - `R-260619-00`: histogram representation mode
 - `R-260620-01`: grouped-measure representation contract
 - `R-260620-02`: latent-KL schedule contract
+- `R-260621-00`: selected mainline and interpretation
 
 ## Active evidence
 
 - `E-260619-00`: attached FITC density smoke validation
 - `E-260620-00`: bounded-input and deterministic-evaluation smoke
-- `E-260620-01`: FITC probability-mass pilot motivating a simplex decoder
-- `E-260620-02`: grouped-measure implementation and attached-data smoke
+- `E-260620-01`: legacy sigmoid probability-mass failure
+- `E-260620-02`: grouped-measure implementation smoke
 - `E-260620-03`: reconstruction gate and latent-KL warmup smoke
+- `E-260621-00`: multi-seed beta convergence and selection
+- `E-260621-01`: decoder-conditioning ablation
+- `E-260621-02`: finalized holdout evaluation
 
 ## Next action
 
-Run a controlled unconditioned latent-KL pilot over a small beta grid and at
-least three seeds. Keep the validated small architecture, random-input/full-
-target contract, and reconstruction-based checkpoint selection fixed. Report
-validation forward KL, active dimensions, same-sample random-view stability,
-and between-sample separation.
+Freeze the current shape-only model and artifact chain. The next work should be
+reporting, visualization, and reproducible export of the three fixed-seed
+latents without further use of the finalized holdout for selection.
 
-Only after the unconditioned latent is characterized should
-`condition_mode: none` be compared with `decoder`, and only where technical
-categories overlap across biological labels.
+Any abundance/rate branch, tail-sensitive objective, OT auxiliary loss,
+supervised disease head, or one-class model is a new development theme and
+must use nested development evaluation or independent data.
 
 ## Deferred or out of scope
 
-- Optional total mass/exposure-rate branch
+- Optional total mass or exposure-normalized event-rate branch
+- Tail-sensitive or cancer-specific rare-event representation
 - OT reconstruction auxiliary loss
 - Point-coordinate measurement-noise augmentation
 - Adversarial batch removal
-- Causal claims under label-batch confounding
+- Prior-calibrated unconditional generation
+- Clinical diagnostic claims
 - CLI cleanup

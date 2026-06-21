@@ -1,7 +1,7 @@
 # R-260620-02: Latent-KL schedule contract
 
 Status: active
-Updated: 2026-06-20
+Updated: 2026-06-21
 
 ## 1. Purpose
 
@@ -109,3 +109,20 @@ Deferred to separate themes:
 ## 6. Related evidence
 
 - E-260620-03
+
+## 7. Selected current-data schedule
+
+The multi-seed convergence study in E-260621-00 selected:
+
+```yaml
+beta: 0.0001
+latent_kl_schedule: linear_warmup
+latent_kl_warmup_epochs: 25
+epochs: 300
+patience: 20
+pretrain_monitor: test_recon
+```
+
+The 300-epoch value is a ceiling. All selected-seed runs stopped by patience
+between epochs 110 and 186. This setting is frozen for the finalized holdout in
+E-260621-02; the holdout must not be used to revise the schedule.
