@@ -161,8 +161,10 @@ denominator, rather than asking the shape encoder to infer group size.
 For the attached assay, the candidate rate is based on aggregated
 `Activity_Spot_Number / All_well_count`. This path is not implemented in the
 current phase because its exposure and likelihood contract must be fixed
-separately. Until then, the canonical latent represents distribution shape,
-not event abundance.
+separately. Until then, the canonical latent represents probability-distribution
+geometry, including coordinate location and shape, but not event abundance. A
+device-shift-invariant shape coordinate is a separate preprocessing contract
+under R-260621-03.
 
 ## 7. Current implementation boundary
 
@@ -181,7 +183,8 @@ Deferred:
 
 ```text
 - event-rate or total-mass encoder/decoder head
-- OT reconstruction auxiliary loss
+- joint Sinkhorn reconstruction auxiliary loss, planned after coordinate
+  selection under R-260621-03
 - free-bits or alternative latent regularization beyond R-260620-02
 - partition-aware resampling
 - adversarial batch removal
@@ -207,8 +210,8 @@ Holdout groups remain excluded from model fitting and model selection.
 ## 9. Empirical selection outcome
 
 The current attached-data selection is recorded in R-260621-00 and
-E-260621-00 through E-260621-02. The selected shape-only configuration uses
-`condition_mode: none`. Decoder-only conditioning remains available for future
+E-260621-00 through E-260621-02. The frozen absolute-coordinate configuration
+uses `condition_mode: none`. Decoder-only conditioning remains available for future
 experiments but was rejected for this dataset because it did not consistently
 improve reconstruction or latent geometry and did not reduce measured batch
 signal.

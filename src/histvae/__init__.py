@@ -6,7 +6,11 @@ except PackageNotFoundError:  # pragma: no cover - fallback for non-installed us
     __version__ = "0+unknown"
 
 from .core import HistVAE
-from .preprocessing import AxisPreprocessingSpec, HistogramPreprocessor
+from .preprocessing import (
+    AxisPreprocessingSpec,
+    GroupCoordinateNormalizer,
+    HistogramPreprocessor,
+)
 
 from .visualization import (
     histogram_bin_edges,

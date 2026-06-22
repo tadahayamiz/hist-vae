@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 Determine whether optional decoder-only technical conditioning should be part
-of the selected shape-only mainline after fixing `beta=1e-4`.
+of the frozen absolute-coordinate benchmark after fixing `beta=1e-4`.
 
 ## 2. Condition definition
 

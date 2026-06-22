@@ -21,10 +21,17 @@ import yaml
 
 HISTOGRAM_MODES = ("count", "density", "probability_mass")
 VALUE_TRANSFORMS = ("none", "log1p")
+GROUP_COORDINATE_MODES = (
+    "none",
+    "raw_median_center",
+    "raw_median_ratio",
+    "log_median_center",
+)
 BOUND_MODES = ("fixed", "quantile")
 QUANTILE_WEIGHTINGS = ("event", "group_equal")
 PREPROCESSOR_TAIL_POLICIES = ("clip", "error")
 PREPROCESSOR_SCHEMA_VERSION = 1
+GROUP_COORDINATE_NORMALIZER_SCHEMA_VERSION = 1
 
 
 def validate_histogram_mode(histogram_mode: str) -> str:
@@ -43,6 +50,16 @@ def validate_value_transform(value_transform: str) -> str:
             "Use 'none' or 'log1p'."
         )
     return value_transform
+
+
+def validate_group_coordinate_mode(group_coordinate_mode: str) -> str:
+    if group_coordinate_mode not in GROUP_COORDINATE_MODES:
+        raise ValueError(
+            f"Unsupported group_coordinate_mode: {group_coordinate_mode!r}. "
+            "Use 'none', 'raw_median_center', 'raw_median_ratio', or "
+            "'log_median_center'."
+        )
+    return group_coordinate_mode
 
 
 def normalize_value_transforms(
@@ -242,6 +259,281 @@ class AxisPreprocessingSpec:
         return asdict(self)
 
 
+class GroupCoordinateNormalizer:
+    """Apply one explicit full-group coordinate normalization contract.
+
+    The normalizer is intentionally separate from
+    :class:`HistogramPreprocessor`.  It computes one statistic from every
+    complete biological group and applies that statistic to every event in the
+    group before any random view is sampled.  Global histogram bounds are then
+    fitted on the normalized training events by ``HistogramPreprocessor``.
+
+    Parameters
+    ----------
+    mode:
+        One of ``"none"``, ``"raw_median_center"``,
+        ``"raw_median_ratio"``, or ``"log_median_center"``.
+    dimension:
+        Number of event-coordinate dimensions.  The selected mode is applied
+        independently to every axis using that axis's full-group median.
+    """
+
+    def __init__(self, mode: str = "none", dimension: int = 1):
+        self.mode = validate_group_coordinate_mode(mode)
+        if not isinstance(dimension, (int, np.integer)) or int(dimension) <= 0:
+            raise ValueError("dimension must be a positive integer.")
+        self.dimension = int(dimension)
+
+    @property
+    def state_sha256(self) -> str:
+        state = self.state_dict(include_state_hash=False)
+        encoded = json.dumps(
+            state, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def transform(
+            self,
+            data: np.ndarray,
+            group: np.ndarray | Sequence[Any],
+            return_statistics: bool = False,
+            ) -> np.ndarray | tuple[np.ndarray, pd.DataFrame]:
+        """Normalize grouped events using statistics from each complete group.
+
+        ``raw_median_center`` subtracts the raw median, while
+        ``raw_median_ratio`` divides by the raw median and subtracts one.
+        ``log_median_center`` applies ``log1p`` first and then subtracts the
+        median in log space.  No mode estimates a statistic from a random
+        subset.
+        """
+        values = self._validate_data(data)
+        group_values = self._validate_group(group, n_rows=len(values))
+        normalized = np.empty_like(values, dtype=np.float64)
+
+        codes, uniques = pd.factorize(group_values, sort=False)
+        if np.any(codes < 0):
+            raise ValueError("group must not contain missing values.")
+
+        records = []
+        for code, group_value in enumerate(uniques):
+            selected = codes == code
+            group_data = values[selected]
+            raw_median = np.median(group_data, axis=0)
+            raw_q25 = np.quantile(group_data, 0.25, axis=0, method="linear")
+            raw_q75 = np.quantile(group_data, 0.75, axis=0, method="linear")
+
+            if self.mode == "none":
+                group_normalized = group_data.copy()
+                applied_median = raw_median
+            elif self.mode == "raw_median_center":
+                group_normalized = group_data - raw_median
+                applied_median = raw_median
+            elif self.mode == "raw_median_ratio":
+                invalid = (~np.isfinite(raw_median)) | (raw_median <= 0)
+                if np.any(invalid):
+                    axes = np.flatnonzero(invalid).tolist()
+                    raise ValueError(
+                        "group_coordinate_mode='raw_median_ratio' requires a "
+                        "finite strictly positive full-group median on every "
+                        f"axis; group={group_value!r}, invalid_axes={axes}."
+                    )
+                group_normalized = group_data / raw_median - 1.0
+                applied_median = raw_median
+            else:
+                if np.any(group_data < 0):
+                    raise ValueError(
+                        "group_coordinate_mode='log_median_center' requires "
+                        "non-negative raw values; "
+                        f"group={group_value!r}."
+                    )
+                log_data = np.log1p(group_data)
+                applied_median = np.median(log_data, axis=0)
+                group_normalized = log_data - applied_median
+
+            if not np.all(np.isfinite(group_normalized)):
+                raise ValueError(
+                    "Group-coordinate normalization produced non-finite "
+                    f"values for group {group_value!r}."
+                )
+            normalized[selected] = group_normalized
+
+            record = {
+                "group": group_value,
+                "mode": self.mode,
+                "event_count": int(selected.sum()),
+            }
+            for axis in range(self.dimension):
+                record[f"raw_median_{axis}"] = float(raw_median[axis])
+                record[f"raw_q25_{axis}"] = float(raw_q25[axis])
+                record[f"raw_q75_{axis}"] = float(raw_q75[axis])
+                record[f"raw_iqr_{axis}"] = float(
+                    raw_q75[axis] - raw_q25[axis]
+                )
+                record[f"applied_median_{axis}"] = float(
+                    applied_median[axis]
+                )
+            records.append(record)
+
+        statistics = pd.DataFrame.from_records(records)
+        if return_statistics:
+            return normalized, statistics
+        return normalized
+
+    def validate_histogram_preprocessor(
+            self, preprocessor: "HistogramPreprocessor | None"
+            ) -> None:
+        """Validate the strict upstream-normalizer/histogram contract."""
+        if preprocessor is None:
+            if self.mode != "none":
+                raise ValueError(
+                    f"group_coordinate_mode={self.mode!r} requires a fitted "
+                    "HistogramPreprocessor whose bounds were fitted after "
+                    "group-coordinate normalization."
+                )
+            return
+        if not isinstance(preprocessor, HistogramPreprocessor):
+            raise TypeError(
+                "histogram_preprocessor must be a HistogramPreprocessor."
+            )
+        preprocessor.require_fitted()
+        if preprocessor.dimension != self.dimension:
+            raise ValueError(
+                "group-coordinate and histogram-preprocessor dimensions must "
+                "match."
+            )
+        if self.mode != "none" and any(
+                transform != "none"
+                for transform in preprocessor.value_transforms
+                ):
+            raise ValueError(
+                "A non-'none' group_coordinate_mode requires "
+                "HistogramPreprocessor axis transforms to be 'none'; the "
+                "group-coordinate normalizer already defines the coordinate."
+            )
+
+    def config_overrides(self) -> dict[str, Any]:
+        """Return serialized configuration values for experiment provenance."""
+        return {
+            "group_coordinate_mode": self.mode,
+            "group_coordinate_normalizer_state": self.state_dict(),
+        }
+
+    def state_dict(self, include_state_hash: bool = True) -> dict[str, Any]:
+        """Return a YAML/JSON-safe deterministic contract state."""
+        state = {
+            "schema_version": GROUP_COORDINATE_NORMALIZER_SCHEMA_VERSION,
+            "type": type(self).__name__,
+            "mode": self.mode,
+            "dimension": self.dimension,
+        }
+        if include_state_hash:
+            state["state_sha256"] = self.state_sha256
+        return state
+
+    @classmethod
+    def from_state_dict(
+            cls, state: Mapping[str, Any]
+            ) -> "GroupCoordinateNormalizer":
+        """Restore and strictly validate a serialized contract state."""
+        if not isinstance(state, Mapping):
+            raise TypeError("Group-coordinate normalizer state must be a mapping.")
+        required = {
+            "schema_version",
+            "type",
+            "mode",
+            "dimension",
+            "state_sha256",
+        }
+        missing = required.difference(state)
+        unknown = set(state).difference(required)
+        if missing:
+            raise ValueError(
+                "Group-coordinate normalizer state is missing keys: "
+                f"{sorted(missing)}."
+            )
+        if unknown:
+            raise ValueError(
+                "Group-coordinate normalizer state has unsupported keys: "
+                f"{sorted(unknown)}."
+            )
+        if int(state["schema_version"]) != (
+                GROUP_COORDINATE_NORMALIZER_SCHEMA_VERSION
+                ):
+            raise ValueError(
+                "Unsupported GroupCoordinateNormalizer schema_version: "
+                f"{state['schema_version']!r}."
+            )
+        if state["type"] != cls.__name__:
+            raise ValueError(
+                f"Unsupported group-coordinate normalizer type: {state['type']!r}."
+            )
+        instance = cls(mode=state["mode"], dimension=state["dimension"])
+        expected_hash = state["state_sha256"]
+        if not cls._is_sha256(expected_hash):
+            raise ValueError(
+                "state_sha256 must be a 64-character SHA-256 hex string."
+            )
+        if expected_hash != instance.state_sha256:
+            raise ValueError(
+                "GroupCoordinateNormalizer state_sha256 does not match state."
+            )
+        return instance
+
+    def save(self, path: str | Path) -> Path:
+        """Save the coordinate contract as safe YAML."""
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(
+                self.state_dict(),
+                handle,
+                sort_keys=False,
+                allow_unicode=True,
+            )
+        return output
+
+    @classmethod
+    def load(cls, path: str | Path) -> "GroupCoordinateNormalizer":
+        """Load a coordinate contract from safe YAML."""
+        with Path(path).open("r", encoding="utf-8") as handle:
+            state = yaml.safe_load(handle)
+        return cls.from_state_dict(state)
+
+    def _validate_data(self, data: np.ndarray) -> np.ndarray:
+        values = np.asarray(data, dtype=np.float64)
+        if self.dimension == 1 and values.ndim == 1:
+            values = values.reshape(-1, 1)
+        if values.ndim != 2 or values.shape[1] != self.dimension:
+            raise ValueError(
+                f"data must have shape (n_rows, {self.dimension}); "
+                f"got {values.shape}."
+            )
+        if len(values) == 0:
+            raise ValueError("data must contain at least one row.")
+        if not np.all(np.isfinite(values)):
+            raise ValueError("data must contain only finite values.")
+        return values
+
+    @staticmethod
+    def _validate_group(group, n_rows: int) -> np.ndarray:
+        values = np.asarray(group)
+        if values.ndim != 1 or len(values) != n_rows:
+            raise ValueError(f"group must have shape ({n_rows},).")
+        if pd.isna(values).any():
+            raise ValueError("group must not contain missing values.")
+        return values
+
+    @staticmethod
+    def _is_sha256(value: Any) -> bool:
+        if not isinstance(value, str) or len(value) != 64:
+            return False
+        try:
+            int(value, 16)
+        except ValueError:
+            return False
+        return True
+
+
 class HistogramPreprocessor:
     """Fit and persist histogram geometry on training data only.
 
@@ -416,6 +708,33 @@ class HistogramPreprocessor:
     def require_fitted(self) -> "HistogramPreprocessor":
         """Raise unless fitted and return ``self`` for explicit API checks."""
         self._require_fitted()
+        return self
+
+    def validate_fit_data(
+            self,
+            data: np.ndarray,
+            group: np.ndarray | Sequence[Any] | None = None,
+            ) -> "HistogramPreprocessor":
+        """Require an exact replay of the events used to fit this geometry.
+
+        The comparison is performed on canonical float64 values and the
+        ordered group vector, when one was supplied during fitting.  This is
+        used by the strict group-coordinate path to ensure that global bounds
+        were fitted on the normalized training events rather than on raw or
+        validation data.
+        """
+        self._require_fitted()
+        values = self._validate_data(data, name="data")
+        group_values = self._validate_group(
+            group, n_rows=len(values), required=False
+        )
+        observed_hash = self._hash_fit_data(values, group_values)
+        if observed_hash != self.fit_data_sha256:
+            raise ValueError(
+                "HistogramPreprocessor was fitted on different training data "
+                "or group ordering. Fit it on the normalized training events "
+                "and replay the same ordered training rows."
+            )
         return self
 
     def transform(self, data: np.ndarray) -> np.ndarray:

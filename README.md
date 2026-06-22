@@ -92,6 +92,7 @@ canonical grouped-measure path:
 ```yaml
 histogram_mode: probability_mass
 value_transform: log1p
+group_coordinate_mode: none
 out_of_range_policy: clip
 
 decoder_output_mode: simplex_softmax
@@ -145,6 +146,81 @@ model.prep_data(
     train_group=group,
 )
 ```
+
+### Full-group shape-coordinate normalization
+
+Instrument-dependent shifts can be removed before histogram construction with
+one explicit full-group coordinate contract. The statistic is calculated from
+the complete biological group before any random training view is sampled, so
+the random input and full reconstruction target use the same group median.
+
+Available modes are strict and explicit:
+
+```text
+none
+raw_median_center   # x - median_group(x); additive-shift invariant
+raw_median_ratio    # x / median_group(x) - 1; multiplicative-gain invariant
+log_median_center   # log1p(x) - median_group(log1p(x))
+```
+
+For a non-`none` mode, fit the global histogram geometry on normalized training
+events only. The histogram preprocessor must use `transform="none"`, because
+the group-coordinate normalizer already defines the coordinate:
+
+```python
+from histvae import (
+    AxisPreprocessingSpec,
+    GroupCoordinateNormalizer,
+    HistogramPreprocessor,
+    HistVAE,
+)
+
+normalizer = GroupCoordinateNormalizer(
+    mode="raw_median_center",
+    dimension=1,
+)
+normalized_train = normalizer.transform(train_data, train_group)
+
+preprocessor = HistogramPreprocessor(
+    axis_specs=[
+        AxisPreprocessingSpec(
+            name="FITC_Sum_shape",
+            transform="none",
+            lower_mode="quantile",
+            lower_value=None,
+            lower_quantile=0.001,
+            upper_mode="quantile",
+            upper_value=None,
+            upper_quantile=0.999,
+            quantile_weighting="group_equal",
+        )
+    ],
+    bins=64,
+    histogram_mode="probability_mass",
+    tail_policy="clip",
+).fit(normalized_train, train_group)
+
+model = HistVAE(
+    config=config,
+    exp_name="fitc-shape",
+    group_coordinate_normalizer=normalizer,
+    histogram_preprocessor=preprocessor,
+)
+model.prep_data(
+    train_data=train_data,          # raw grouped events
+    train_group=train_group,
+    test_data=validation_data,      # each validation group uses its own median
+    test_group=validation_group,
+)
+```
+
+The model config records deterministic states and hashes for both the group
+coordinate normalizer and the train-fitted histogram preprocessor. HistVAE
+also verifies that the histogram bounds were fitted on the exact normalized
+training rows. `model.group_coordinate_statistics` contains group event counts,
+raw medians, raw IQRs, and the applied median for train and validation groups.
+`raw_median_ratio` raises an error when any group median is non-finite or not
+strictly positive.
 
 ### Train-fitted histogram preprocessing
 

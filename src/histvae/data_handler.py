@@ -15,6 +15,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 from .preprocessing import (
+    GroupCoordinateNormalizer,
     HISTOGRAM_MODES,
     VALUE_TRANSFORMS,
     HistogramPreprocessor,
@@ -252,7 +253,7 @@ class PointHistDataset(Dataset):
             histogram_mode=None, out_of_range_policy=None,
             value_transform=None, sampling_mode="random",
             target_sampling_mode="paired", condition=None,
-            histogram_preprocessor=None
+            histogram_preprocessor=None, group_coordinate_normalizer=None
             ):
         """
         Parameters
@@ -306,22 +307,51 @@ class PointHistDataset(Dataset):
             tail policy, bin counts, and histogram mode are authoritative.
             Explicit histogram arguments must either be omitted or match the
             fitted state exactly.
+
+        group_coordinate_normalizer: GroupCoordinateNormalizer, optional
+            Full-group coordinate contract applied before histogram
+            construction and before any random point subset is sampled. A
+            non-``"none"`` mode requires a fitted ``histogram_preprocessor``
+            whose bounds were fitted on the normalized training events.
         
         """
         super().__init__()
-        data = np.asarray(data)
-        if data.ndim == 1:
-            data = data.reshape(-1, 1)
+        raw_data = np.asarray(data)
+        if raw_data.ndim == 1:
+            raw_data = raw_data.reshape(-1, 1)
         group = np.asarray(group)
         # check the input
-        assert data.shape[0] == group.shape[0], "!! data and group must have the same number of samples !!"
+        assert raw_data.shape[0] == group.shape[0], "!! data and group must have the same number of samples !!"
         if label is not None:
-            assert data.shape[0] == label.shape[0], "!! data, group, and label must have the same number of samples !!"
+            assert raw_data.shape[0] == label.shape[0], "!! data, group, and label must have the same number of samples !!"
         if condition is not None:
             condition = validate_condition_array(
-                condition, n_observations=data.shape[0]
+                condition, n_observations=raw_data.shape[0]
             )
-        self.ndim = data.shape[1]
+        self.ndim = raw_data.shape[1]
+        if group_coordinate_normalizer is None:
+            group_coordinate_normalizer = GroupCoordinateNormalizer(
+                mode="none", dimension=self.ndim
+            )
+        elif not isinstance(
+                group_coordinate_normalizer, GroupCoordinateNormalizer
+                ):
+            raise TypeError(
+                "group_coordinate_normalizer must be a "
+                "GroupCoordinateNormalizer."
+            )
+        if group_coordinate_normalizer.dimension != self.ndim:
+            raise ValueError(
+                "group_coordinate_normalizer dimensions must match data."
+            )
+        group_coordinate_normalizer.validate_histogram_preprocessor(
+            histogram_preprocessor
+        )
+        data, group_coordinate_statistics = (
+            group_coordinate_normalizer.transform(
+                raw_data, group, return_statistics=True
+            )
+        )
         if histogram_preprocessor is not None:
             if not isinstance(histogram_preprocessor, HistogramPreprocessor):
                 raise TypeError(
@@ -382,9 +412,12 @@ class PointHistDataset(Dataset):
             if value_transform is None:
                 value_transform = "none"
 
+        self.raw_data = raw_data
         self.data = data
         self.group = group
         self.label = label
+        self.group_coordinate_normalizer = group_coordinate_normalizer
+        self.group_coordinate_statistics = group_coordinate_statistics
         self.bins = compress_axis_setting(normalize_bins(bins, self.ndim))
         self.num_points = num_points
         self.min_vals = normalize_range_values(
@@ -714,7 +747,7 @@ class DataHandler:
     def make_dataset(
             self, data, group, label=None, condition=None, transform=False,
             sampling_mode="random", target_sampling_mode="paired",
-            histogram_preprocessor=None
+            histogram_preprocessor=None, group_coordinate_normalizer=None
             ):
         """
         make dataset for training and testing
@@ -742,6 +775,10 @@ class DataHandler:
             ds_args["condition"] = condition
         if histogram_preprocessor is not None:
             ds_args["histogram_preprocessor"] = histogram_preprocessor
+        if group_coordinate_normalizer is not None:
+            ds_args["group_coordinate_normalizer"] = (
+                group_coordinate_normalizer
+            )
         if transform is not None:
             ds_args["transform"] = transform
         ds_args["sampling_mode"] = sampling_mode

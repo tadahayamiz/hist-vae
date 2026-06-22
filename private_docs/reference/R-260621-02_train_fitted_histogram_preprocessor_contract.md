@@ -67,6 +67,12 @@ Different axes may use different transforms in multidimensional data.
 Raw and transformed bin edges are both available. Scientific figures continue
 to default to raw coordinates under R-260621-01.
 
+This class currently applies only pointwise axis transforms. It does not compute
+per-group medians, centering, ratios, or IQR scaling. The future strict
+group-coordinate stage is upstream of this preprocessor and is defined in
+R-260621-03; after group normalization, this preprocessor remains responsible
+for train-fitted global histogram geometry.
+
 ## 5. Tail contract
 
 `clip` maps values below or above the fitted range to the corresponding edge

@@ -32,11 +32,13 @@ from .data_handler import (
     validate_value_transform,
 )
 from .preprocessing import (
+    GroupCoordinateNormalizer,
     HistogramPreprocessor,
     compress_axis_setting,
     normalize_bins,
     normalize_range_values,
     normalize_value_transforms,
+    validate_group_coordinate_mode,
 )
 from .utils import fix_seed
 from .visualization import (
@@ -160,13 +162,83 @@ def make_optimizer(parameters, config):
 class HistVAE:
     def __init__(
             self, config: dict=None, outdir: str=None, exp_name: str=None,
-            seed: int=42, histogram_preprocessor=None
+            seed: int=42, histogram_preprocessor=None,
+            group_coordinate_normalizer=None
             ):
         # arguments
         assert config is not None, "!! config must be given !!"
         self.config = config
         self.config["in_dims"] = int(self.config["in_dims"])
         dimension = self.config["in_dims"]
+
+        configured_coordinate_mode = validate_group_coordinate_mode(
+            self.config.get("group_coordinate_mode", "none")
+        )
+        serialized_coordinate_state = self.config.get(
+            "group_coordinate_normalizer_state"
+        )
+        serialized_coordinate_normalizer = (
+            None
+            if serialized_coordinate_state is None
+            else GroupCoordinateNormalizer.from_state_dict(
+                serialized_coordinate_state
+            )
+        )
+        if serialized_coordinate_normalizer is not None:
+            if serialized_coordinate_normalizer.dimension != dimension:
+                raise ValueError(
+                    "group_coordinate_normalizer dimensions must equal "
+                    "config in_dims."
+                )
+            if configured_coordinate_mode != (
+                    serialized_coordinate_normalizer.mode
+                    ):
+                raise ValueError(
+                    "group_coordinate_mode differs from the serialized "
+                    "group_coordinate_normalizer state."
+                )
+        if group_coordinate_normalizer is not None:
+            if not isinstance(
+                    group_coordinate_normalizer, GroupCoordinateNormalizer
+                    ):
+                raise TypeError(
+                    "group_coordinate_normalizer must be a "
+                    "GroupCoordinateNormalizer."
+                )
+            if group_coordinate_normalizer.dimension != dimension:
+                raise ValueError(
+                    "group_coordinate_normalizer dimensions must equal "
+                    "config in_dims."
+                )
+            if (
+                    serialized_coordinate_normalizer is None
+                    and configured_coordinate_mode != "none"
+                    and configured_coordinate_mode
+                    != group_coordinate_normalizer.mode
+                    ):
+                raise ValueError(
+                    "The constructor group_coordinate_normalizer conflicts "
+                    "with the explicit non-'none' group_coordinate_mode in "
+                    "config."
+                )
+            if (
+                    serialized_coordinate_normalizer is not None
+                    and serialized_coordinate_normalizer.state_sha256
+                    != group_coordinate_normalizer.state_sha256
+                    ):
+                raise ValueError(
+                    "The constructor group_coordinate_normalizer differs "
+                    "from the serialized config state."
+                )
+            resolved_coordinate_normalizer = group_coordinate_normalizer
+        elif serialized_coordinate_normalizer is not None:
+            resolved_coordinate_normalizer = serialized_coordinate_normalizer
+        else:
+            resolved_coordinate_normalizer = GroupCoordinateNormalizer(
+                mode=configured_coordinate_mode,
+                dimension=dimension,
+            )
+        self.config.update(resolved_coordinate_normalizer.config_overrides())
 
         serialized_state = self.config.get("histogram_preprocessor_state")
         serialized_preprocessor = (
@@ -197,6 +269,9 @@ class HistVAE:
                 raise ValueError(
                     "histogram_preprocessor dimensions must equal config in_dims."
                 )
+            resolved_coordinate_normalizer.validate_histogram_preprocessor(
+                resolved_preprocessor
+            )
             self.config.update(resolved_preprocessor.config_overrides())
 
         bins_per_dim = normalize_bins(self.config["bins"], dimension)
@@ -267,6 +342,8 @@ class HistVAE:
         self.test_loader = None
         self.train_lut = None
         self.test_lut = None
+        self.group_coordinate_normalizer = resolved_coordinate_normalizer
+        self.group_coordinate_statistics = None
         self.histogram_preprocessor = resolved_preprocessor
         self.model = None
         self.trainer = None
@@ -321,6 +398,9 @@ class HistVAE:
             raise ValueError(
                 "histogram_preprocessor dimensions must equal config in_dims."
             )
+        self.group_coordinate_normalizer.validate_histogram_preprocessor(
+            preprocessor
+        )
         self.config.update(preprocessor.config_overrides())
         self._pending_histogram_geometry = {}
         validate_grouped_measure_contract(self.config)
@@ -384,6 +464,15 @@ class HistVAE:
             Passing it to the HistVAE constructor is preferred because the
             fitted state then replaces default geometry before model-contract
             validation.
+
+        Notes
+        -----
+        ``group_coordinate_mode`` is resolved in the constructor from the
+        config, serialized state, or explicit ``GroupCoordinateNormalizer``.
+        Raw train/test rows are normalized with one full-group statistic before
+        dataset sampling. Non-``"none"`` modes require a fitted histogram
+        preprocessor whose geometry exactly replays the normalized training
+        rows.
         """
         histogram_overrides = {
             "histogram_mode": histogram_mode,
@@ -500,6 +589,7 @@ class HistVAE:
         if train_data is None or train_group is None:
             raise ValueError("train_data and train_group are required.")
         train_data = np.asarray(train_data)
+        train_group = np.asarray(train_group)
         if train_data.ndim == 1:
             train_data = train_data.reshape(-1, 1)
         if train_data.ndim != 2 or train_data.shape[1] != self.config["in_dims"]:
@@ -507,13 +597,44 @@ class HistVAE:
                 "train_data dimensions must match config in_dims."
             )
         if test_data is not None:
+            if test_group is None:
+                raise ValueError("test_group is required when test_data is supplied.")
             test_data = np.asarray(test_data)
+            test_group = np.asarray(test_group)
             if test_data.ndim == 1:
                 test_data = test_data.reshape(-1, 1)
             if test_data.ndim != 2 or test_data.shape[1] != self.config["in_dims"]:
                 raise ValueError(
                     "test_data dimensions must match config in_dims."
                 )
+
+        self.group_coordinate_normalizer.validate_histogram_preprocessor(
+            self.histogram_preprocessor
+        )
+        train_coordinate_data, train_coordinate_statistics = (
+            self.group_coordinate_normalizer.transform(
+                train_data,
+                train_group,
+                return_statistics=True,
+            )
+        )
+        test_coordinate_data = None
+        test_coordinate_statistics = None
+        if test_data is not None:
+            test_coordinate_data, test_coordinate_statistics = (
+                self.group_coordinate_normalizer.transform(
+                    test_data,
+                    test_group,
+                    return_statistics=True,
+                )
+            )
+        self.group_coordinate_statistics = {
+            "train": train_coordinate_statistics,
+        }
+        if test_coordinate_statistics is not None:
+            self.group_coordinate_statistics["test"] = (
+                test_coordinate_statistics
+            )
 
         if self.histogram_preprocessor is None and self._pending_histogram_geometry:
             details = ", ".join(
@@ -533,12 +654,23 @@ class HistVAE:
             )
 
         if self.histogram_preprocessor is not None:
+            if self.group_coordinate_normalizer.mode != "none":
+                fit_used_group = (
+                    self.histogram_preprocessor.fit_summary.get("n_groups")
+                    is not None
+                )
+                self.histogram_preprocessor.validate_fit_data(
+                    train_coordinate_data,
+                    train_group if fit_used_group else None,
+                )
             diagnostics = {
-                "train": self.histogram_preprocessor.diagnose(train_data),
+                "train": self.histogram_preprocessor.diagnose(
+                    train_coordinate_data
+                ),
             }
-            if test_data is not None:
+            if test_coordinate_data is not None:
                 diagnostics["test"] = self.histogram_preprocessor.diagnose(
-                    test_data
+                    test_coordinate_data
                 )
             self.config["histogram_preprocessor_diagnostics"] = diagnostics
         # dataset
@@ -548,6 +680,7 @@ class HistVAE:
             sampling_mode=train_sampling_mode,
             target_sampling_mode=train_target_sampling_mode,
             histogram_preprocessor=self.histogram_preprocessor,
+            group_coordinate_normalizer=self.group_coordinate_normalizer,
             )
         if test_data is not None:
             self.test_dataset = self.data_handler.make_dataset(
@@ -556,6 +689,7 @@ class HistVAE:
                 sampling_mode=test_sampling_mode,
                 target_sampling_mode=test_target_sampling_mode,
                 histogram_preprocessor=self.histogram_preprocessor,
+                group_coordinate_normalizer=self.group_coordinate_normalizer,
                 )
         # dataloader
         self.train_loader = self.data_handler.make_dataloader(

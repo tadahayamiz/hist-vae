@@ -1,6 +1,6 @@
 # Implementation Schedule
 
-Updated: 2026-06-21
+Updated: 2026-06-22
 
 ## Done
 
@@ -49,6 +49,23 @@ Updated: 2026-06-21
   diagnostics, and strict reuse through `HistVAE.prep_data()`.
 - Kept legacy drop behavior outside the fitted preprocessor for backward
   compatibility while preventing drop-and-renormalize in the new contract.
+- Corrected the research terminology: the finalized `log1p` model is a frozen
+  absolute-coordinate benchmark, not a device-invariant shape-only model.
+- Recorded the holdout-free log-normalization pilot and retained
+  `log_median_center` as the reference over median-plus-IQR scaling.
+- Defined the future raw shape-coordinate candidates and a dimension-independent
+  joint Sinkhorn-divergence ablation in R-260621-03.
+- Added strict `GroupCoordinateNormalizer` modes: `none`,
+  `raw_median_center`, `raw_median_ratio`, and `log_median_center`.
+- Applied the group-coordinate transform to complete groups before random-view
+  sampling, so random inputs and full targets share the same group statistic.
+- Added strict positive-median checks for ratio normalization, negative
+  centered-coordinate support, raw median/IQR/event-count summaries, and safe
+  deterministic state serialization.
+- Required non-`none` group-coordinate modes to use a fitted
+  `HistogramPreprocessor` with pointwise transform `none`.
+- Added exact normalized-training-data replay validation for fitted histogram
+  geometry and restored both preprocessing states from saved configs.
 
 ## Verification
 
@@ -72,6 +89,19 @@ actual-data smoke:                    519,118 rows; 94 train / 20 validation gro
 fitted group-equal q0.999 upper:      97,626 FITC_Sum
 train / validation upper-tail rate:  0.1065% / 0.0660%
 train, validation, reconstruction:    finite simplex tensors of shape (*, 1, 64)
+```
+
+Group-coordinate normalization verification:
+
+```text
+focused normalizer tests:             7 passed
+related preprocessing/measure tests: 39 passed
+regular full pytest:                 77 passed, 5 skipped
+full pytest including slow tests:    82 passed
+actual-data smoke:                   519,118 rows; 134 groups
+raw_median_center q0.001/q0.999:     -19,279 / 53,707
+raw_median_ratio q0.001/q0.999:      -0.41854 / 1.34531
+max abs normalized group median:     0.0 / 5.6e-17
 ```
 
 Final selected validation result:
@@ -98,24 +128,32 @@ secondary probability-ensemble AUC: 0.774
 
 ## Next
 
-- Freeze and document the selected configuration and exact checkpoint hashes.
-- Generate raw-space figures and tables from the finalized artifacts without
-  selecting a seed or changing the model.
-- Export the three fixed-seed `mu` representations with explicit seed and
-  split provenance.
-- Use a new development protocol or independent cohort before testing any new
-  disease-specific objective or model branch.
+- Keep the finalized absolute-coordinate checkpoints frozen and finish only
+  descriptive figures, tables, and three-seed `mu` exports from those artifacts.
+- Phase 2, next one theme: run the KL-only coordinate ablation on new
+  development data against
+  the completed `log_median_center` reference; include synthetic shift
+  invariance and batch-predictability diagnostics.
+- Phase 3: after fixing the coordinate and any required beta retuning, compare
+  forward KL with forward KL plus joint Sinkhorn divergence using the same
+  mathematical OT contract in 1D, 2D, and 3D.
+- Freeze all settings before one-time evaluation on a new independent holdout.
 
 ## Deferred
 
 - Optional event-mass or exposure-normalized-rate input/output branch
 - Tail-mass summaries or rare-event-aware loss
-- Exact 1D W1 and multidimensional Sinkhorn auxiliary losses
+- Median-plus-IQR normalization as a primary representation
 - Point-coordinate jitter calibrated from technical controls
 - Weak supervised disease head, one-class model, or contrastive
   disease-specific latent
 - Prior-calibration and unconditional-generation evaluation
 - CLI repair or redesign
+
+## Documentation-only refresh
+
+The 2026-06-21 shape-coordinate/OT planning update changed Markdown files only.
+No source code or tests were changed, so pytest was not run for this refresh.
 
 ## Temporary shims
 

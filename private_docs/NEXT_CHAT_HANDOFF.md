@@ -1,73 +1,73 @@
 # Next Chat Handoff
 
-Updated: 2026-06-21
+Updated: 2026-06-22
 
-The shape-only grouped-measure mainline is selected and the holdout is
-finalized. Use pooled `sample_name` groups; acquisition `slice` values remain
-QC metadata only.
+## Current state
 
-Frozen configuration:
+The existing probability-mass/simplex/forward-KL model and its 20-group holdout
+are finalized. Its coordinate is absolute `log1p(FITC_Sum)` with a frozen
+0-to-100,000 range. It is a stable absolute-coordinate distribution benchmark,
+not a device-invariant shape-only model. Do not reopen its beta, architecture,
+condition mode, checkpoint, seed, probe, or holdout.
 
-```text
-probability mass + log1p bins + clipping at 100,000
-64 bins; random 1,024-event train input; full-group target/evaluation
-latent dimension 4; hidden dimensions [8, 16]
-simplex-softmax decoder; forward-KL reconstruction
-beta 1e-4 with 25-epoch linear warmup
-300-epoch ceiling; patience 20; RAdam
-condition_mode none
-seeds 17, 42, 73
-```
+A separate holdout-free pilot compared `log_median_center` with
+`log_median_iqr`. Median centering was retained as the reference because it
+preserved width and had stronger improvement over the mean-distribution
+baseline, sample/view separation, and retrieval. IQR scaling remains
+sensitivity analysis.
 
-The beta convergence experiment selected `1e-4`; the decoder-conditioning
-ablation selected `none`. The final 20-group holdout was evaluated once with
-all three fixed seeds. Mean holdout forward KL was `0.006251` versus the
-train-mean baseline `0.051049`; all samples beat the baseline, all four latent
-dimensions were active, random-view retrieval was `0.829`, and input-W1 versus
-latent-distance Spearman was `0.882`.
+## New research decision
 
-The fixed disease-label probe gave mean AUC `0.734`; the secondary probability
-average gave AUC `0.774`. Treat this as exploratory because the holdout has only
-six PC samples and the expected disease signal may be sparse rather than a
-clean two-cluster shift.
-
-Do not use the finalized holdout to alter beta, architecture, condition mode,
-checkpoint, seed, probe hyperparameters, threshold, or a new loss. Do not pick
-the best seed. The current main artifact is deterministic full-group posterior
-mean `mu` from all three fixed seeds.
-
-Raw-space visualization is now implemented. `Histogram.get_bin_edges("raw")`
-inverts log1p bin geometry; `HistVAE.check_data()` and
-`HistVAE.plot_reconstruction()` default to raw coordinates. For probability
-mass on unequal raw-width bins, `plot_value_mode="auto"` displays raw-space
-density while forward KL remains computed in model mass space. The sampled
-reconstruction mode uses an explicit seed and a full-group target. Focused
-visualization tests passed 8/8, and the full suite including slow tests passed
-65/65.
-
-Train-fitted preprocessing is now a reusable API for future datasets:
+Instrument-specific intensity shifts are expected. Plain raw absolute
+`FITC_Sum` is therefore not the future mainline. The next development cycle is
+shape-oriented and prespecifies:
 
 ```text
-AxisPreprocessingSpec
-HistogramPreprocessor.fit(train_data, train_group)
-HistVAE(..., histogram_preprocessor=preprocessor)
-HistVAE.prep_data(...)
+raw_median_center = x - median_group(x)       # additive-shift invariant
+raw_median_ratio  = x / median_group(x) - 1   # multiplicative-gain invariant
+log_median_center                              # completed reference
 ```
 
-Transforms are explicit per axis (`none` or `log1p`). Lower and upper bounds
-can independently be fixed or fitted as training quantiles. Percentiles can
-weight events equally or give each biological group equal total weight. The
-new path permits only `clip` or `error`, persists safe-YAML state and hashes,
-and reuses the same fitted object on validation/holdout. Constructor injection
-is the canonical path because the fitted state replaces stale default geometry
-before model-contract validation. Do not refit it on validation or holdout. The
-actual-data smoke fitted a group-equal q0.999 upper bound of 97,626 and produced
-finite 64-bin simplex tensors. The finalized FITC checkpoints retain their
-original 0-to-100,000 log1p/clip contract and are not reopened by this
-implementation.
+Width, skewness, multimodality, and relative tails remain part of shape. Event
+count/rate is stored separately because probability-mass normalization removes
+it regardless of the coordinate.
 
-Next one theme: generate the final descriptive reconstruction figures and
-three-seed latent exports from the frozen artifacts. Do not use visual quality
-on the finalized holdout to select a seed or alter the model. Any
-abundance/rate, tail-sensitive, OT, supervised, one-class, or prior-generation
-study starts a new development cycle with new validation data.
+`GroupCoordinateNormalizer` is now implemented as the strict upstream step.
+It computes one full-group median before random sampling, supports negative
+centered coordinates, rejects nonpositive ratio denominators, exports raw
+median/IQR/event-count summaries, and persists a deterministic state. A
+non-`none` coordinate mode requires a fitted `HistogramPreprocessor` with
+pointwise transform `none`, and HistVAE verifies that its geometry was fitted
+on the exact normalized training rows.
+
+## Completed in the latest change
+
+Phase 1 is complete. Focused tests cover additive and multiplicative
+invariance, width preservation, negative centered coordinates, strict ratio
+denominators, full-group statistic sharing, state replay, and wrong-geometry
+rejection. Full pytest including slow tests passes.
+
+## Next one theme
+
+Run the KL-only coordinate ablation on new development data:
+
+```text
+raw_median_center
+raw_median_ratio
+log_median_center  # completed reference
+```
+
+Do not use the finalized holdout. Keep architecture, observation loss, split,
+and seed matrix fixed. Selection must include synthetic additive and
+multiplicative shift invariance, reconstruction versus each model-specific mean
+baseline, random-view stability/retrieval, technical-batch predictability, and
+shape-summary fidelity. All posterior-mean dimensions remain the formal latent
+artifact.
+
+## Following theme, not now
+
+After fixing the coordinate and any required beta retuning, add an
+observation-space joint Sinkhorn divergence to forward KL. Use the same joint OT
+contract in 1D/2D/3D; do not average independent axis-wise distances. Exact 1D
+CDF-W1 is a validation metric for the implementation, not a separate training
+method.

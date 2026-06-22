@@ -1,9 +1,9 @@
-# R-260621-00: Selected grouped-measure mainline and interpretation
+# R-260621-00: Frozen absolute-coordinate grouped-measure benchmark
 
 Status: active
 Updated: 2026-06-21
 
-## 1. Selected use case
+## 1. Frozen benchmark use case
 
 The selected mainline learns one deterministic sample-level representation from
 pooled, low-dimensional point measurements. For the current assay, all
@@ -14,9 +14,11 @@ encoded as independent replicates.
 The primary artifact is the posterior mean `mu` obtained from the deterministic
 full-group probability-mass histogram. The model is intended to preserve stable
 sample-to-sample differences in distribution location and shape while reducing
-finite-event sampling noise.
+finite-event sampling noise. Probability-mass normalization removes total event
+abundance but does not remove the absolute `log1p` coordinate location; this
+frozen benchmark is not evidence of device-shift invariance.
 
-## 2. Frozen shape-only configuration
+## 2. Frozen absolute-coordinate configuration
 
 The selected configuration is:
 
@@ -174,9 +176,11 @@ decision threshold. The three fixed seeds remain co-primary evaluation runs;
 no best seed is selected. The probability ensemble is secondary and
 descriptive.
 
-Any new tail-sensitive loss, abundance/rate branch, OT term, supervised head,
-or one-class disease model begins a new development cycle and requires nested
-development evaluation or an independent cohort.
+Any new group-normalized raw coordinate, tail-sensitive loss, abundance/rate
+branch, OT term, supervised head, or one-class disease model begins a new
+development cycle and requires nested development evaluation or an independent
+cohort. The shape-oriented coordinate and joint-OT plan is defined separately in
+R-260621-03.
 
 ## 9. Related evidence
 

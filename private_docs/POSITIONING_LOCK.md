@@ -10,9 +10,18 @@ scheme.
 - The biological sample is the latent unit.
 - Image tiles, fields, or slices are merged when they are acquisition
   partitions of one measured sample region.
-- Fixed histogram coordinates retain absolute distribution location and width.
 - Probability-mass normalization removes total event count, not point-value
-  intensity or distribution shifts.
+  intensity or distribution shifts. Probability mass alone is therefore not a
+  shape-only transformation.
+- The frozen `log1p` benchmark retains absolute distribution location and width.
+  Its finalized evidence does not establish invariance to device intensity
+  shifts.
+- The future shape mainline uses a strict per-sample robust coordinate
+  normalization before histogram construction; plain raw absolute intensity is
+  not the main candidate.
+- Distribution width is retained as biological shape by default. IQR scaling is
+  a sensitivity analysis unless technical controls show that width is
+  predominantly instrumental.
 - Total event mass/rate is a distinct optional feature and must be modeled
   explicitly when scientifically meaningful.
 - The measure-aware mainline uses simplex output and distribution
@@ -23,16 +32,16 @@ scheme.
 - Decoder conditioning is not equivalent to causal batch correction and cannot
   identify disease effects under label-batch confounding.
 - Disease labels are not used in unsupervised pretraining or model selection.
-- The selected output for downstream use is deterministic full-group posterior
-  mean `mu`, reported across three fixed seeds.
-- The selected model is a weakly VAE-regularized denoising distributional
+- For the frozen benchmark, the downstream output is deterministic full-group
+  posterior mean `mu`, reported across three fixed seeds.
+- The frozen benchmark is a weakly VAE-regularized denoising distributional
   autoencoder. Representation quality is supported; prior-calibrated generation
   and posterior-uncertainty calibration are not established.
-- Final holdout reconstruction, random-view stability, and geometry preservation
-  support a sample-representation claim.
+- Its final holdout reconstruction, random-view stability, and geometry
+  preservation support an absolute-coordinate sample-representation claim.
 - The disease linear probe is exploratory. It does not establish clinical
   diagnosis, two-cluster separation, or causality.
-- The finalized holdout must not be reused for further model or threshold
-  selection.
+- The finalized absolute-coordinate holdout must not be reused for raw-shape,
+  OT, or any other model or threshold selection.
 - Technical execution and reconstruction quality do not by themselves establish
   biological mechanism.
