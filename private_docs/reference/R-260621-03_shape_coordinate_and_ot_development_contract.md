@@ -21,57 +21,59 @@ Total event count or exposure-normalized event rate remains a separate feature.
 It is not recovered by switching from log to raw coordinates because the
 histogram is still normalized to probability mass.
 
-## 2. Prespecified coordinate candidates
+## 2. Coordinate decision after E-260622-00
 
-For sample `s`, let `m_s` be the median of its full set of raw event values
-`x_si`.
+For sample `s`, let `m_s` be the median of its complete raw event set `x_si`.
+The KL-only development ablation fixed the coordinate under the stated assay
+assumption that instrument intensity variation is primarily a positive
+multiplicative gain.
 
-### 2.1 Primary raw candidate: median centering
-
-```text
-u_si = x_si - m_s
-```
-
-This is exactly invariant to an additive device offset:
-
-```text
-x'_si = x_si + c  =>  u'_si = u_si
-```
-
-It preserves distribution width in the original measurement unit as well as
-skewness, multiple modes, and relative tails. Negative normalized coordinates
-are expected and valid.
-
-### 2.2 Required raw comparator: ratio to the median
+### 2.1 Selected mainline: raw ratio to the median
 
 ```text
 u_si = x_si / m_s - 1
 ```
 
-This is exactly invariant to a multiplicative gain:
+This is exactly invariant to a positive multiplicative gain:
 
 ```text
 x'_si = a * x_si, a > 0  =>  u'_si = u_si
 ```
 
-It is dimensionless and preserves relative width and relative tail position. It
-requires a finite strictly positive group median; violating that condition is a
-hard error rather than a silent offset or fallback.
+It is dimensionless and preserves relative width, skewness, multimodality, and
+relative tail position. It requires a finite strictly positive group median;
+violating that condition is a hard error rather than a silent offset or
+fallback.
 
-### 2.3 Existing log reference
+In E-260622-00, all prespecified 0.5x, 0.75x, 1.5x, and 2.0x validation shifts
+produced zero normalized input W1, zero standardized-latent shift, and perfect
+self-retrieval for every seed. The finalized holdout was untouched.
 
-`log_median_center` remains the completed development reference. It is not the
-raw candidate, but it provides a useful benchmark because a multiplicative gain
-is approximately a translation after `log1p` for sufficiently large positive
-values.
+### 2.2 Sensitivity reference: log median centering
 
-`median + IQR` normalization is not a main candidate because dividing by IQR
-removes sample-specific width. It remains a sensitivity analysis only when
-technical controls show that width itself is dominated by instrumentation.
+`log_median_center` remains the sensitivity reference. It is approximately
+multiplicative-invariant at the observed large positive intensities and showed
+lower native validation forward KL, but it defines log-domain rather than
+linear-ratio bin geometry.
 
-The additive-versus-multiplicative mechanism must be determined empirically
-from technical controls and prespecified synthetic-shift tests. Reconstruction
-alone is not sufficient to choose between median centering and median ratio.
+### 2.3 Additive-offset reference
+
+```text
+u_si = x_si - m_s
+```
+
+`raw_median_center` is exactly invariant to additive offsets and preserves
+width in raw measurement units. In the ablation it was not invariant to
+multiplicative gains, so it is not the development mainline under the current
+scientific contract.
+
+`median + IQR` normalization remains sensitivity analysis only because dividing
+by IQR removes sample-specific width. Plain raw absolute intensity is not a
+shape-only selection candidate.
+
+The coordinate decision is conditional on the stated technical mechanism.
+Physical technical replicates should still test whether real device variation
+contains a material additive component.
 
 ## 3. Processing and leakage boundary
 
@@ -143,49 +145,35 @@ Implemented focused tests cover:
 - deterministic serialization of the selected coordinate contract
 ```
 
-## 5. Coordinate-selection experiment
+## 5. Coordinate-selection experiment: complete
 
-The first new experiment changes only the coordinate contract and keeps the
-observation loss as forward KL. It compares:
+E-260622-00 compared `raw_median_center`, `raw_median_ratio`, and
+`log_median_center` with forward KL only, fixed architecture/beta/split, three
+seeds, and no holdout access. Selection used reconstruction, random-view
+stability, distribution/latent geometry, technical-batch diagnostics, and
+prespecified synthetic shifts rather than native forward KL alone.
 
-```text
-raw_median_center
-raw_median_ratio
-log_median_center  # completed reference
-```
+Three-seed means were:
 
-`median + IQR` is report-only sensitivity analysis. Plain raw absolute is a
-technical diagnostic, not a selection candidate.
+| Coordinate | Val KL | Recon W1 | Between/within | Retrieval | W1-latent | Multiplicative latent/between | Multiplicative retrieval |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `log_median_center` | 0.012763 | 0.004571 | 3.970 | 0.745 | 0.657 | 0.000 | 1.000 |
+| `raw_median_center` | 0.014440 | 0.004684 | 5.506 | 0.781 | 0.723 | 1.604 | 0.054 |
+| `raw_median_ratio` | 0.013312 | 0.004534 | 4.178 | 0.765 | 0.521 | 0.000 | 1.000 |
 
-Use a new development protocol or independent cohort. The finalized holdout
-from E-260621-02 is unavailable for this choice.
+All four latent dimensions were active for every seed. `raw_median_ratio` was
+selected because its exact multiplicative-invariance contract matches the
+stated technical assumption. Raw median and event count/rate remain separate
+sample metadata.
 
-Selection must consider all of the following rather than native forward KL
-alone, because different coordinate geometries allocate bins differently:
+## 6. Dimension-independent OT contract and implemented API
 
-```text
-- improvement over each model's train-mean distribution baseline
-- full-group reconstruction and quantile/tail fidelity
-- random-view within/between distance ratio and retrieval
-- synthetic additive- and multiplicative-shift invariance
-- technical-batch predictability from latent
-- distribution-distance versus latent-distance rank correlation
-- all latent dimensions retained for downstream analysis
-- active-dimension count used only as a collapse diagnostic
-```
-
-Distance-based downstream analyses use all posterior-mean dimensions, with
-standardization fitted on the training split. Near-zero-variance removal is a
-numerical preprocessing step only, not the definition of the representation.
-
-## 6. Dimension-independent OT contract
-
-OT is a second ablation after the coordinate mode, architecture, and latent-KL
-schedule are fixed. The observation-space loss is:
+OT is a second ablation after fixing `raw_median_ratio`, architecture, and the
+latent-KL schedule. The observation-space loss is:
 
 ```text
-L_recon = KL(p || p_hat) + lambda_ot * S_epsilon(p, p_hat)
-L_total = L_recon + beta(t) * KL(q(z | input) || N(0, I))
+L_observation = KL(p || p_hat) + lambda_ot * S_epsilon(p, p_hat)
+L_total = L_observation + beta(t) * KL(q(z | input) || N(0, I))
 ```
 
 where the debiased entropic Sinkhorn divergence is:
@@ -197,46 +185,97 @@ S_epsilon(P, Q)
   - 0.5 * OT_epsilon(Q, Q)
 ```
 
-The same mathematical contract is used for 1D, 2D, and 3D. The transport plan
-is computed on the joint histogram, not by averaging axis-wise marginal OT.
-Therefore diagonal, quadrant, and other cross-dimensional dependencies remain
-visible.
+The same mathematical contract is used for 1D, 2D, and 3D. The transport is
+computed on the flattened joint histogram, never by averaging axis-wise
+marginal distances. Diagonal, quadrant, and other cross-dimensional
+dependencies therefore remain represented.
 
-The ground cost uses Euclidean distance between joint bin centers after the
-selected group-coordinate normalization. Each axis is scaled with its
-train-fitted global range to a comparable `[0, 1]` metric range for the OT cost
-only; this does not remove sample-specific width or alter the model histogram.
+The ground support is constructed from the active histogram bin centers. Each
+axis is mapped with its train-fitted global edge range into `[0, 1]`, then the
+joint coordinate is divided by `sqrt(d)` so the enclosing Euclidean diameter is
+at most one. This is a metric-only transformation; it does not change the
+sample histograms or remove sample-specific width.
 
-An exact CDF-based 1D W1 may be retained as a numerical validation metric for
-the Sinkhorn implementation, but it is not a different 1D training objective.
-Higher-dimensional implementations may use dense, sparse, separable, or
-tensorized backends while preserving the same joint Sinkhorn-divergence
-contract.
+The strict repository configuration is now:
 
-`epsilon` and `lambda_ot` are selected on development data only. A practical
-lambda grid should be scaled from the median forward-KL and Sinkhorn magnitudes
-of the fixed KL-only model so that numeric units do not determine the result.
-This is observation-space OT and must not be confused with WAE-style latent
-prior matching.
+```yaml
+ot_loss: none              # none or sinkhorn
+ot_weight: 0.0
+ot_p: 1                    # 1: Euclidean; 2: half squared Euclidean
+ot_blur: 0.05
+ot_scaling: 0.8
+ot_backend: tensorized     # tensorized, online, multiscale
+ot_mass_epsilon: 0.0
+```
+
+`ot_loss: sinkhorn` requires all of:
+
+```text
+histogram_mode: probability_mass
+decoder_output_mode: simplex_softmax
+reconstruction_loss: forward_kl
+ot_weight > 0
+```
+
+`JointSinkhornDivergence` is differentiable and stores the normalized joint
+support as a model buffer. `HistVAE` derives that support from the fitted
+`HistogramPreprocessor` when present, otherwise from explicit fixed config
+geometry. Non-`none` group-coordinate modes therefore use exactly the
+normalized training geometry already recorded by the preprocessor.
+
+`geomloss==0.3.1` is a core dependency. `tensorized` is the default and has a
+strict pairwise-memory guard. `online` and `multiscale` preserve the same loss
+contract but require the explicit `ot-scalable` PyKeOps extra; missing PyKeOps
+is a hard error, not a fallback. Exact CDF-based 1D W1 remains an evaluation and
+numerical-validation metric rather than a separate training objective.
+
+Training history, checkpoint metadata, and deterministic reconstruction exports
+record separately:
+
+```text
+base_reconstruction     # forward KL
+sinkhorn                # unweighted divergence
+weighted_sinkhorn       # lambda_ot * sinkhorn
+observation             # base + weighted term
+```
+
+`pretrain_monitor: test_recon` continues to monitor the complete observation
+loss for OT-enabled runs. Different lambda values must not be ranked by the
+combined observation value alone because changing lambda changes its numeric
+scale. Selection uses prespecified gates on base forward KL and compares
+unweighted geometric/fidelity metrics across candidates.
+
+`ot_blur` and `ot_weight` remain development hyperparameters. A practical
+weight grid is scaled from fixed KL-only training medians so numeric units do
+not determine the result. This is observation-space OT and is not WAE-style
+latent-prior matching.
 
 ## 7. Ordered roadmap
 
 ```text
-Phase 1: implement and test strict group-coordinate normalization [complete]
-Phase 2: run the KL-only coordinate ablation on new development data
-Phase 3: fix the raw shape coordinate and, if necessary, retune beta
-Phase 4: ablate forward KL versus forward KL + joint Sinkhorn divergence
+Phase 1: strict group-coordinate normalization                         [complete]
+Phase 2: KL-only coordinate ablation                                   [complete]
+Phase 3: fix raw_median_ratio under multiplicative-gain contract       [complete]
+Phase 4a: strict joint Sinkhorn config/API and tests                    [complete]
+Phase 4b: development-only KL versus KL + Sinkhorn ablation            [next]
 Phase 5: freeze all choices and evaluate a new independent holdout once
 ```
 
-Do not implement the group-coordinate change and OT loss in one code request.
-The next one-theme task is Phase 1.
+The next execution notebook must assume a fresh VM: clone and pin one Git
+commit, install the complete planned dependency stack in the setup cell, and
+include reporting analyses such as linear probing and UMAP from the outset when
+they are part of the run. No cell may rely on state from a previous VM session.
 
 ## 8. Claim boundary
 
 The completed absolute-coordinate benchmark remains valid evidence for its own
-frozen data contract. It is not evidence that the latent is invariant to device
-intensity shifts. The completed log-normalization pilot supports median
-centering over IQR scaling within the tested log family, but it does not yet
-establish that a raw-domain candidate is superior or that Sinkhorn improves the
-representation.
+frozen data contract and is not evidence of device-shift invariance.
+E-260622-00 verifies that `raw_median_ratio` exactly satisfies the prespecified
+synthetic multiplicative-gain contract and supports its use as the development
+mainline under that assumption. It does not prove that real device variation is
+purely multiplicative or that this coordinate is universally superior.
+
+The repository now verifies that joint Sinkhorn is implemented, strict,
+differentiable, and artifact-traceable in 1D/2D/3D. No evidence yet shows that
+adding it improves reconstruction or latent geometry on the assay; that claim
+remains open until Phase 4b is completed.

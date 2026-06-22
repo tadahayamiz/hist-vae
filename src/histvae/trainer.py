@@ -343,6 +343,19 @@ class PreTrainer(BaseTrainer):
             "early_stop_epoch": None,
             "elapsed_time": None
         }
+        self._last_train_observation_components = None
+        self._last_test_observation_components = None
+
+
+    def _observation_metadata(self):
+        return {
+            "ot_loss": self.config.get("ot_loss", "none"),
+            "ot_weight": float(self.config.get("ot_weight", 0.0)),
+            "ot_p": int(self.config.get("ot_p", 1)),
+            "ot_blur": float(self.config.get("ot_blur", 0.05)),
+            "ot_scaling": float(self.config.get("ot_scaling", 0.8)),
+            "ot_backend": self.config.get("ot_backend", "tensorized"),
+        }
 
 
     def train(self, trainloader, testloader):
@@ -366,6 +379,24 @@ class PreTrainer(BaseTrainer):
             ) = self.evaluate(testloader)
             last_epoch = epoch
             monitor_eligible = epoch >= self.monitor_start_epoch
+            train_components = self._last_train_observation_components
+            test_components = self._last_test_observation_components
+            if train_components is None or test_components is None:
+                if self.config.get("ot_loss", "none") != "none":
+                    raise RuntimeError(
+                        "Observation-loss component logging is missing for "
+                        "an OT-enabled trainer."
+                    )
+                train_components = {
+                    "base_reconstruction": train_recon,
+                    "sinkhorn": 0.0,
+                    "weighted_sinkhorn": 0.0,
+                }
+                test_components = {
+                    "base_reconstruction": test_recon,
+                    "sinkhorn": 0.0,
+                    "weighted_sinkhorn": 0.0,
+                }
             # logging
             self.run_callbacks(
                 epoch=epoch,
@@ -375,6 +406,12 @@ class PreTrainer(BaseTrainer):
                 train_kl=train_kl,
                 test_recon=test_recon,
                 test_kl=test_kl,
+                train_base_recon=train_components["base_reconstruction"],
+                test_base_recon=test_components["base_reconstruction"],
+                train_sinkhorn=train_components["sinkhorn"],
+                test_sinkhorn=test_components["sinkhorn"],
+                train_weighted_sinkhorn=train_components["weighted_sinkhorn"],
+                test_weighted_sinkhorn=test_components["weighted_sinkhorn"],
                 test_latent_std_mean=test_latent_std_mean,
                 test_active_latent_dims=test_active_latent_dims,
                 beta=self.current_beta,
@@ -405,7 +442,11 @@ class PreTrainer(BaseTrainer):
                     optimizer=self.optimizer,
                     name=f"epoch_{epoch}",
                     outdir=self.resdir,
-                    metadata={"epoch": epoch, "beta": self.current_beta},
+                    metadata={
+                        "epoch": epoch,
+                        "beta": self.current_beta,
+                        **self._observation_metadata(),
+                    },
                 )
         if self.early_stopping.best_epoch is None:
             raise RuntimeError(
@@ -420,6 +461,7 @@ class PreTrainer(BaseTrainer):
             metadata={
                 "epoch": last_epoch,
                 "beta": latent_kl_weight(self.config, epoch=last_epoch),
+                **self._observation_metadata(),
             },
         )
         self.early_stopping.restore(self.model, self.optimizer)
@@ -449,6 +491,7 @@ class PreTrainer(BaseTrainer):
                 "beta": latent_kl_weight(
                     self.config, epoch=self.early_stopping.best_epoch
                 ),
+                **self._observation_metadata(),
             },
             )
 
@@ -460,6 +503,9 @@ class PreTrainer(BaseTrainer):
         total_loss = 0.0
         total_recon_loss = 0.0
         total_kl_loss = 0.0
+        total_base_reconstruction = 0.0
+        total_sinkhorn = 0.0
+        total_weighted_sinkhorn = 0.0
         total_samples = 0 # for averaging the loss
         # initialize the gradients
         self.optimizer.zero_grad()
@@ -474,8 +520,9 @@ class PreTrainer(BaseTrainer):
                 hist1, condition=condition
                 ) # output, mu, logvar
             # loss calculation
-            loss, recon_loss, kl_loss = self.model.vae_loss(
-                recon, hist0, mu, logvar, beta=self.current_beta
+            loss, recon_loss, kl_loss, components = self.model.vae_loss(
+                recon, hist0, mu, logvar, beta=self.current_beta,
+                return_components=True
                 )
             # note: loss is averaged over the batch
             # backpropagation
@@ -491,7 +538,19 @@ class PreTrainer(BaseTrainer):
             total_loss += loss.detach().item() * batch_size
             total_recon_loss += recon_loss.detach().item() * batch_size
             total_kl_loss += kl_loss.detach().item() * batch_size
+            total_base_reconstruction += (
+                components["base_reconstruction"].detach().item() * batch_size
+            )
+            total_sinkhorn += components["sinkhorn"].detach().item() * batch_size
+            total_weighted_sinkhorn += (
+                components["weighted_sinkhorn"].detach().item() * batch_size
+            )
             total_samples += batch_size
+        self._last_train_observation_components = {
+            "base_reconstruction": total_base_reconstruction / total_samples,
+            "sinkhorn": total_sinkhorn / total_samples,
+            "weighted_sinkhorn": total_weighted_sinkhorn / total_samples,
+        }
         return total_loss / total_samples, total_recon_loss / total_samples, total_kl_loss / total_samples
 
 
@@ -501,6 +560,9 @@ class PreTrainer(BaseTrainer):
         total_loss = 0.0
         total_recon_loss = 0.0
         total_kl_loss = 0.0
+        total_base_reconstruction = 0.0
+        total_sinkhorn = 0.0
+        total_weighted_sinkhorn = 0.0
         total_samples = 0 # for averaging the loss
         latent_means = []
         with torch.no_grad():
@@ -514,14 +576,22 @@ class PreTrainer(BaseTrainer):
                     hist1, sample_latent=False, condition=condition
                     ) # deterministic validation path
                 # loss calculation
-                loss, recon_loss, kl_loss = self.model.vae_loss(
-                    recon, hist0, mu, logvar, beta=self.current_beta
+                loss, recon_loss, kl_loss, components = self.model.vae_loss(
+                    recon, hist0, mu, logvar, beta=self.current_beta,
+                    return_components=True
                     )
                 # Loss accumulation
                 batch_size = hist0.shape[0]
                 total_loss += loss.item() * batch_size # detach() is not necessary
                 total_recon_loss += recon_loss.item() * batch_size
                 total_kl_loss += kl_loss.item() * batch_size
+                total_base_reconstruction += (
+                    components["base_reconstruction"].item() * batch_size
+                )
+                total_sinkhorn += components["sinkhorn"].item() * batch_size
+                total_weighted_sinkhorn += (
+                    components["weighted_sinkhorn"].item() * batch_size
+                )
                 total_samples += batch_size
                 latent_means.append(mu.detach().cpu())
         latent_means = torch.cat(latent_means, dim=0)
@@ -530,6 +600,11 @@ class PreTrainer(BaseTrainer):
         active_latent_dims = int(
             (latent_std >= self.active_latent_threshold).sum().item()
         )
+        self._last_test_observation_components = {
+            "base_reconstruction": total_base_reconstruction / total_samples,
+            "sinkhorn": total_sinkhorn / total_samples,
+            "weighted_sinkhorn": total_weighted_sinkhorn / total_samples,
+        }
         return (
             total_loss / total_samples,
             total_recon_loss / total_samples,

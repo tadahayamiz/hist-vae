@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from enum import Enum
 import inspect
 
+from .optimal_transport import JointSinkhornDivergence, validate_ot_config
+
 
 DECODER_OUTPUT_MODES = ("legacy_sigmoid", "simplex_softmax")
 RECONSTRUCTION_LOSSES = ("mse", "forward_kl")
@@ -201,8 +203,10 @@ class ConvVAE(nn.Module):
     def __init__(
             self, input_shape=None, latent_dim=128, hidden_dims=None,
             dropout_conv=0.3, decoder_output_mode="legacy_sigmoid",
-            reconstruction_loss="mse", condition_mode="none",
-            condition_dim=0
+            reconstruction_loss="mse", ot_loss="none", ot_weight=0.0,
+            ot_p=1, ot_blur=0.05, ot_scaling=0.8,
+            ot_backend="tensorized", ot_mass_epsilon=0.0,
+            ot_support=None, condition_mode="none", condition_dim=0
             ):
         """
         Variational Autoencoder (VAE) for 1D, 2D, and 3D data.
@@ -228,6 +232,16 @@ class ConvVAE(nn.Module):
         reconstruction_loss: str
             ``"mse"`` preserves the original loss. ``"forward_kl"`` computes
             target-to-reconstruction KL and requires simplex output.
+
+        ot_loss, ot_weight: str, float
+            Optional observation-space ``"sinkhorn"`` auxiliary loss and its
+            non-negative weight. The Sinkhorn path requires probability-mass
+            targets, simplex output, and forward KL as the base loss.
+
+        ot_p, ot_blur, ot_scaling, ot_backend, ot_mass_epsilon:
+            Strict joint Sinkhorn-divergence parameters. ``ot_support`` must be
+            the normalized joint bin-center coordinates constructed from the
+            fitted histogram geometry.
 
         condition_mode: str
             ``"none"`` disables sample-level conditioning. ``"decoder"``
@@ -262,6 +276,49 @@ class ConvVAE(nn.Module):
                 "decoder_output_mode='simplex_softmax' currently requires "
                 "a single histogram channel."
             )
+        ot_config = {
+            "ot_loss": ot_loss,
+            "ot_weight": ot_weight,
+            "ot_p": ot_p,
+            "ot_blur": ot_blur,
+            "ot_scaling": ot_scaling,
+            "ot_backend": ot_backend,
+            "ot_mass_epsilon": ot_mass_epsilon,
+            "histogram_mode": (
+                "probability_mass"
+                if self.decoder_output_mode == "simplex_softmax"
+                else None
+            ),
+            "decoder_output_mode": self.decoder_output_mode,
+            "reconstruction_loss": self.reconstruction_loss,
+        }
+        validate_ot_config(ot_config)
+        self.ot_loss = ot_config["ot_loss"]
+        self.ot_weight = ot_config["ot_weight"]
+        self.ot_p = ot_config["ot_p"]
+        self.ot_blur = ot_config["ot_blur"]
+        self.ot_scaling = ot_config["ot_scaling"]
+        self.ot_backend = ot_config["ot_backend"]
+        self.ot_mass_epsilon = ot_config["ot_mass_epsilon"]
+        if self.ot_loss == "sinkhorn":
+            if ot_support is None:
+                raise ValueError(
+                    "ot_loss='sinkhorn' requires normalized joint bin support."
+                )
+            self.ot_divergence = JointSinkhornDivergence(
+                support=ot_support,
+                p=self.ot_p,
+                blur=self.ot_blur,
+                scaling=self.ot_scaling,
+                backend=self.ot_backend,
+                mass_epsilon=self.ot_mass_epsilon,
+            )
+        else:
+            if ot_support is not None:
+                raise ValueError(
+                    "ot_support must be omitted when ot_loss='none'."
+                )
+            self.ot_divergence = None
         self.condition_mode = validate_condition_mode(condition_mode)
         self.condition_dim = int(condition_dim)
         if self.condition_mode == "none" and self.condition_dim != 0:
@@ -347,57 +404,89 @@ class ConvVAE(nn.Module):
         recon = self.decode(z, condition=condition)
         return recon, mu, logvar
 
-    def vae_loss(self, recon_x, x, mu, logvar, beta=1.0):
-        """
-        Compute the VAE loss function.
- 
-        Parameters       
-        ----------
-        recon_x: torch.Tensor
-            Reconstructed output from the decoder   
-        
-        x: torch.Tensor
-            Original input data
-        
-        mu, logvar: torch.Tensor
-            Latent space parameters (mean and log variance)
-
-        beta: float
-            Weight for the KL divergence term (default: 1.0)
-
-        """
-
+    def _base_reconstruction_per_sample(self, recon_x, x):
+        if recon_x.shape != x.shape:
+            raise ValueError("Target and reconstruction shapes must match.")
         batch_size = x.size(0)
         if self.reconstruction_loss == "mse":
-            recon_loss = F.mse_loss(recon_x, x, reduction="sum") / batch_size
+            return (
+                (recon_x - x)
+                .pow(2)
+                .flatten(start_dim=1)
+                .sum(dim=1)
+            )
+
+        tolerance = 1e-5
+        target_flat = x.flatten(start_dim=1)
+        recon_flat = recon_x.flatten(start_dim=1)
+        if torch.any(target_flat < -tolerance) or torch.any(
+                recon_flat < -tolerance
+                ):
+            raise ValueError(
+                "forward_kl requires non-negative target and reconstruction."
+            )
+        target_sums = target_flat.sum(dim=1)
+        recon_sums = recon_flat.sum(dim=1)
+        ones = torch.ones(batch_size, device=x.device, dtype=x.dtype)
+        if not torch.allclose(target_sums, ones, rtol=1e-5, atol=1e-5):
+            raise ValueError(
+                "forward_kl requires each target histogram to sum to one."
+            )
+        if not torch.allclose(recon_sums, ones, rtol=1e-5, atol=1e-5):
+            raise ValueError(
+                "forward_kl requires each reconstruction to sum to one."
+            )
+        eps = torch.finfo(recon_flat.dtype).eps
+        elementwise = F.kl_div(
+            torch.log(recon_flat.clamp_min(eps)),
+            target_flat,
+            reduction="none",
+        )
+        return elementwise.sum(dim=1)
+
+    def observation_loss_components(self, recon_x, x, reduction="mean"):
+        """Return base, Sinkhorn, weighted, and combined observation losses."""
+        base = self._base_reconstruction_per_sample(recon_x, x)
+        if self.ot_divergence is None:
+            sinkhorn = torch.zeros_like(base)
         else:
-            tolerance = 1e-5
-            target_flat = x.flatten(start_dim=1)
-            recon_flat = recon_x.flatten(start_dim=1)
-            if torch.any(target_flat < -tolerance) or torch.any(recon_flat < -tolerance):
-                raise ValueError(
-                    "forward_kl requires non-negative target and reconstruction."
-                )
-            target_sums = target_flat.sum(dim=1)
-            recon_sums = recon_flat.sum(dim=1)
-            ones = torch.ones_like(target_sums)
-            if not torch.allclose(target_sums, ones, rtol=1e-5, atol=1e-5):
-                raise ValueError(
-                    "forward_kl requires each target histogram to sum to one."
-                )
-            if not torch.allclose(recon_sums, ones, rtol=1e-5, atol=1e-5):
-                raise ValueError(
-                    "forward_kl requires each reconstruction to sum to one."
-                )
-            eps = torch.finfo(recon_flat.dtype).eps
-            recon_loss = F.kl_div(
-                torch.log(recon_flat.clamp_min(eps)),
-                target_flat,
-                reduction="sum",
-            ) / batch_size
-        # for clear understanding, we use sum instead of mean
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
+            sinkhorn = self.ot_divergence(x, recon_x, reduction="none")
+        weighted_sinkhorn = self.ot_weight * sinkhorn
+        combined = base + weighted_sinkhorn
+
+        values = {
+            "base_reconstruction": base,
+            "sinkhorn": sinkhorn,
+            "weighted_sinkhorn": weighted_sinkhorn,
+            "observation": combined,
+        }
+        if reduction == "none":
+            return values
+        if reduction == "mean":
+            return {key: value.mean() for key, value in values.items()}
+        if reduction == "sum":
+            return {key: value.sum() for key, value in values.items()}
+        raise ValueError("reduction must be 'none', 'mean', or 'sum'.")
+
+    def vae_loss(
+            self, recon_x, x, mu, logvar, beta=1.0,
+            return_components=False
+            ):
+        """Compute observation reconstruction plus latent VAE KL."""
+        batch_size = x.size(0)
+        components = self.observation_loss_components(
+            recon_x, x, reduction="mean"
+        )
+        recon_loss = components["observation"]
+        # for clear understanding, we use sum instead of mean over dimensions
+        kl_loss = (
+            -0.5
+            * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+            / batch_size
+        )
         total_loss = recon_loss + beta * kl_loss
+        if return_components:
+            return total_loss, recon_loss, kl_loss, components
         return total_loss, recon_loss, kl_loss
 
 
@@ -456,9 +545,18 @@ class LinearHead(nn.Module):
         return logits, recon, mu, logvar
 
 
-    def vae_loss(self, recon_x, x, mu, logvar, beta=1.0):
+    def vae_loss(
+            self, recon_x, x, mu, logvar, beta=1.0,
+            return_components=False
+            ):
         return self.pretrained.vae_loss(
-            recon_x, x, mu, logvar, beta=beta
+            recon_x, x, mu, logvar, beta=beta,
+            return_components=return_components
+        )
+
+    def observation_loss_components(self, recon_x, x, reduction="mean"):
+        return self.pretrained.observation_loss_components(
+            recon_x, x, reduction=reduction
         )
     
 
@@ -471,10 +569,20 @@ class ModelHandler:
     def __init__(self, config:dict):
         assert isinstance(config, dict), "!! config must be a dictionary !!"
         self.config = config
+        self.ot_support = None
+
+    def set_ot_support(self, support):
+        self.ot_support = support
 
     def make_pretrain(self):
         model_params = inspect.signature(ConvVAE.__init__).parameters # diff
         model_args = {k: self.config[k] for k in model_params if k in self.config}
+        if self.config.get("ot_loss", "none") == "sinkhorn":
+            if self.ot_support is None:
+                raise RuntimeError(
+                    "Joint OT support must be prepared before model creation."
+                )
+            model_args["ot_support"] = self.ot_support
         model = ConvVAE(**model_args)
         for param in model.parameters():
             param.requires_grad = True

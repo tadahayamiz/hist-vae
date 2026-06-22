@@ -1,6 +1,6 @@
 # Open Questions
 
-Updated: 2026-06-21
+Updated: 2026-06-22
 
 ## Resolved for the frozen absolute-coordinate benchmark
 
@@ -14,27 +14,32 @@ Updated: 2026-06-21
   location; the finalized model is not device-shift invariant.
 - Within the completed log-domain pilot, median centering is the reference and
   median-plus-IQR is sensitivity analysis only.
+- Under the prespecified multiplicative-gain contract, `raw_median_ratio` is the
+  selected development coordinate; `log_median_center` remains sensitivity
+  analysis and the finalized holdout was untouched.
+- Synthetic 0.5x, 0.75x, 1.5x, and 2.0x gains produce exactly zero input and
+  latent shift after `raw_median_ratio` normalization.
 
-## Active coordinate questions
+## Remaining coordinate questions
 
-- Are device differences primarily additive offsets, multiplicative gains, or a
-  mixture? This determines whether `raw_median_center` or
-  `raw_median_ratio` is the stronger invariance contract.
-- Do technical replicates and synthetic shifts confirm invariance without
-  removing biologically meaningful width, skewness, multimodality, or tails?
+- Do physical technical replicates confirm that real device variation is
+  predominantly multiplicative rather than an additive-plus-multiplicative
+  mixture?
 - Should the full-group median remain the canonical statistic at deployment, or
   must view-local median uncertainty also be modeled for low-event samples?
-- What common reporting metrics best compare coordinate systems whose native
-  bin geometries and forward-KL scales differ?
+- Which calibrated raw-median metadata can be interpreted biologically across
+  instruments after the shape coordinate removes group-level gain?
 
 ## Active OT questions
 
-- What entropic regularization `epsilon` and auxiliary weight `lambda_ot` retain
-  forward-KL fidelity while improving geometric reconstruction?
-- Which sparse, separable, or tensorized backend is needed to compute the same
-  joint Sinkhorn-divergence contract efficiently in 2D and 3D?
-- Does observation-space joint Sinkhorn improve reconstruction, view stability,
-  or latent geometry after the coordinate mode is fixed?
+- What `ot_blur` and `ot_weight` retain forward-KL fidelity while improving
+  geometric reconstruction on fixed `raw_median_ratio` data?
+- Does observation-space joint Sinkhorn improve exact 1D W1, quantile/tail
+  fidelity, view stability, or latent geometry across three seeds?
+- At what joint bin count must the tensorized backend be replaced by the same
+  mathematical contract using the online or multiscale PyKeOps backend?
+- Does `ot_p=1` remain preferable to `ot_p=2` after the primary weight ablation,
+  or should `p` be held fixed as part of the method definition?
 
 ## Other open research questions
 

@@ -21,6 +21,13 @@ cd histvae
 pip install -e .
 ```
 
+For online or multiscale Sinkhorn backends, install the explicit scalable OT
+extra in the same environment:
+
+```bash
+pip install -e ".[ot-scalable]"
+```
+
 ## Dependencies
 
 HistVAE depends primarily on:
@@ -33,6 +40,10 @@ HistVAE depends primarily on:
 - matplotlib
 - tqdm
 - schedulefree
+- GeomLoss 0.3.1
+
+Online and multiscale Sinkhorn backends additionally require PyKeOps through
+the `ot-scalable` extra. Tensorized Sinkhorn is available in the core install.
 
 PyTorch is intentionally not installed directly by HistVAE because the appropriate build depends on your CPU/CUDA environment. Install a suitable PyTorch build first, then install HistVAE. The packaged configuration explicitly uses `schedulefree.RAdamScheduleFree`; set `optimizer: radam` to use `torch.optim.RAdam` instead. HistVAE does not silently switch optimizers.
 
@@ -176,7 +187,7 @@ from histvae import (
 )
 
 normalizer = GroupCoordinateNormalizer(
-    mode="raw_median_center",
+    mode="raw_median_ratio",
     dimension=1,
 )
 normalized_train = normalizer.transform(train_data, train_group)
@@ -282,6 +293,60 @@ The saved state records resolved raw bounds, axis transforms, bin counts,
 training tail fractions, and a state hash. Loading it with
 `HistogramPreprocessor.load()` reproduces the same histogram geometry.
 
+### Joint Sinkhorn auxiliary observation loss
+
+The grouped probability-measure path can add one debiased entropic Sinkhorn
+divergence to forward KL through the public configuration/API:
+
+```yaml
+histogram_mode: probability_mass
+decoder_output_mode: simplex_softmax
+reconstruction_loss: forward_kl
+
+ot_loss: sinkhorn
+ot_weight: 0.1
+ot_p: 1
+ot_blur: 0.05
+ot_scaling: 0.8
+ot_backend: tensorized
+ot_mass_epsilon: 0.0
+```
+
+The observation and total losses are:
+
+```text
+L_observation = KL(target || reconstruction)
+                + ot_weight * Sinkhorn(target, reconstruction)
+L_total       = L_observation + beta(t) * latent_KL
+```
+
+The implementation constructs the complete joint support from the active
+1D/2D/3D histogram bin centers. Each axis is globally scaled by its fitted edge
+range for the OT ground metric, and the joint coordinate is divided by
+`sqrt(d)`. It never replaces joint OT with independent axis-wise marginal
+metrics, so cross-dimensional structure remains represented.
+
+`tensorized` is appropriate only when the joint bin count and batch size fit the
+strict memory guard. `online` and `multiscale` preserve the same mathematical
+loss but require installation with `.[ot-scalable]`; HistVAE raises an explicit
+error when that dependency is absent.
+
+Training history records `train/test_base_recon`, `train/test_sinkhorn`, and
+`train/test_weighted_sinkhorn`. `train/test_recon` remains the complete
+observation loss used by `pretrain_monitor: test_recon`. Checkpoints record the
+OT contract, and `HistVAE.get_reconstruction()` returns the four per-sample
+components:
+
+```text
+base_reconstruction_loss
+sinkhorn_divergence
+weighted_sinkhorn_divergence
+observation_loss
+```
+
+The same API is used for 1D, 2D, and 3D. Exact one-dimensional CDF-W1 can still
+be used as an external evaluation check.
+
 ### Raw-space histogram and reconstruction plots
 
 Histogram construction and plotting use separate coordinate contracts. A model
@@ -321,8 +386,8 @@ result, figure, axes = model.plot_reconstruction(
 ```
 
 The returned `result` contains the full target, model input, reconstruction,
-posterior parameters, group identifiers, raw bin edges, and per-sample forward
-KL when that reconstruction loss is active. One- and two-dimensional
+posterior parameters, group identifiers, raw bin edges, and per-sample base,
+Sinkhorn, weighted-Sinkhorn, and combined observation losses. One- and two-dimensional
 reconstruction figures are supported.
 
 ### Optional decoder-side technical conditioning
@@ -415,6 +480,7 @@ repo
 │     ├─ config.yaml
 │     ├─ data_handler.py
 │     ├─ models.py
+│     ├─ optimal_transport.py
 │     ├─ trainer.py
 │     ├─ utils.py
 │     └─ visualization.py

@@ -25,6 +25,13 @@ hidden_dims: [32, 64, 128, 256]
 dropout_conv: 0.3
 decoder_output_mode: legacy_sigmoid  # legacy_sigmoid or simplex_softmax
 reconstruction_loss: mse  # mse or forward_kl
+ot_loss: none  # none or sinkhorn auxiliary observation loss
+ot_weight: 0.0
+ot_p: 1  # 1: Euclidean cost; 2: half squared-Euclidean cost
+ot_blur: 0.05  # epsilon = ot_blur ** ot_p
+ot_scaling: 0.8
+ot_backend: tensorized  # tensorized, online, or multiscale
+ot_mass_epsilon: 0.0
 condition_mode: none  # none or decoder
 condition_dim: 0
 beta: 1.0  # final latent-KL weight

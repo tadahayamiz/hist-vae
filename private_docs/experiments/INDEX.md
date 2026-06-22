@@ -11,3 +11,4 @@
 | E-260621-01 | Decoder-conditioning ablation | complete |
 | E-260621-02 | Finalized absolute-coordinate holdout evaluation | finalized |
 | E-260621-03 | Log-domain shape-normalization pilot | complete |
+| E-260622-00 | KL-only raw shape-coordinate ablation | complete |

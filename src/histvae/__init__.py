@@ -19,3 +19,9 @@ from .visualization import (
     plot_scatter,
     prepare_histogram_for_plot,
 )
+
+from .optimal_transport import (
+    JointSinkhornDivergence,
+    build_joint_bin_support,
+    validate_ot_config,
+)

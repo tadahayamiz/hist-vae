@@ -11,18 +11,28 @@ VAE.
 
 ## Current objective
 
-The finalized FITC model is a frozen absolute-coordinate `log1p`
-probability-mass benchmark. It learns a stable representation of each sample's
-empirical distribution and excludes total event abundance, but it retains
-absolute distribution location. It is therefore not a device-invariant
-shape-only model.
+The finalized FITC model remains a frozen absolute-coordinate `log1p`
+probability-mass benchmark. It is stable under finite-event subsampling but is
+not a device-invariant shape-only model.
 
-Because instrument-specific intensity shifts are expected, the active future
-development direction is a shape-oriented raw-domain coordinate with
-per-biological-sample robust normalization before histogram construction. The
-attached assay is an application dataset, not the definition of the model; the
-reusable grouped-measure contract remains applicable to low-dimensional events,
-cells, particles, or image-derived spots.
+The active development mainline is now `raw_median_ratio`, selected in the
+holdout-free coordinate ablation E-260622-00 under the prespecified assumption
+that instrument intensity variation is primarily a positive multiplicative
+gain. The coordinate is
+
+```text
+u_si = x_si / median_group(x_s) - 1
+```
+
+and therefore retains relative width, skewness, multimodality, and relative
+tails while removing group-level gain. `log_median_center` remains the
+sensitivity reference. Total event abundance and the removed raw median remain
+separate sample metadata rather than implicit components of the shape latent.
+
+The next empirical question is whether adding joint observation-space
+Sinkhorn divergence to forward KL improves geometric reconstruction or latent
+quality. The strict reusable OT config/API is implemented; its benefit has not
+yet been established by the ablation.
 
 ## Sample contract
 
@@ -79,33 +89,46 @@ the current dataset.
 
 ## Active development direction
 
-The next shape-oriented coordinate study does not use plain raw absolute
-`FITC_Sum`. It prespecifies:
+The KL-only coordinate ablation is complete:
 
 ```text
-primary raw candidate:   x - group_median(x)
-required raw comparator: x / group_median(x) - 1
-completed log reference: log_median_center
-IQR scaling:             sensitivity analysis only
+main:                    raw_median_ratio
+sensitivity reference:   log_median_center
+additive-shift reference: raw_median_center
+IQR scaling:              sensitivity analysis only
 ```
 
-Median centering removes additive device offsets while retaining width. Median
-ratio removes multiplicative gain while retaining relative width. Technical
-controls and synthetic shift tests, not reconstruction alone, determine which
-invariance is appropriate.
+`raw_median_ratio` was exactly invariant to all prespecified 0.5x, 0.75x,
+1.5x, and 2.0x synthetic gains after each validation group was renormalized:
+input W1 and latent shift were zero and self-retrieval remained one for every
+seed. This is a mathematical contract check, not proof that all real device
+variation is purely multiplicative.
 
-The strict reusable `GroupCoordinateNormalizer` is now implemented upstream of
-`HistogramPreprocessor`. It supports the four explicit modes in
-R-260621-03, computes one full-group statistic before random-view sampling,
-exports raw median/IQR/event-count summaries, persists a deterministic state,
-and requires the global histogram geometry to replay the exact normalized
-training rows. Non-`none` modes require `HistogramPreprocessor` axis transforms
-to remain `none`.
+The strict reusable `GroupCoordinateNormalizer` remains upstream of the
+train-fitted `HistogramPreprocessor`. Non-`none` coordinate modes require
+pointwise histogram transform `none`, and global histogram geometry is fitted
+on normalized training groups only.
 
-After the coordinate mode is fixed, forward KL will be ablated against forward
-KL plus a joint Sinkhorn divergence. The same joint OT definition will be used
-in 1D, 2D, and 3D; exact 1D W1 is an evaluation check rather than a separate
-training method.
+The repository now exposes a strict joint-Sinkhorn observation-loss API:
+
+```yaml
+reconstruction_loss: forward_kl
+ot_loss: sinkhorn
+ot_weight: <positive lambda>
+ot_p: 1
+ot_blur: 0.05
+ot_scaling: 0.8
+ot_backend: tensorized  # online/multiscale require the ot-scalable extra
+ot_mass_epsilon: 0.0
+```
+
+The implemented observation term is
+`forward KL + ot_weight * joint Sinkhorn divergence`. Joint bin centers are
+constructed from the active train-fitted histogram geometry, each axis is
+scaled globally for the ground metric, and the complete 1D/2D/3D joint support
+is transported. Axis-wise marginal OT is not used. Training history,
+checkpoints, and reconstruction exports report base KL, unweighted Sinkhorn,
+weighted Sinkhorn, and their combined observation loss separately.
 
 ## Final evidence status
 
@@ -170,23 +193,39 @@ batch correction, or clinical diagnostic performance.
 - `E-260621-01`: decoder-conditioning ablation
 - `E-260621-02`: finalized absolute-coordinate holdout evaluation
 - `E-260621-03`: log-domain shape-normalization pilot; holdout untouched
+- `E-260622-00`: KL-only raw shape-coordinate ablation; holdout untouched
 
 ## Next action
 
 Keep the finalized absolute-coordinate checkpoints and their reporting artifact
-chain frozen. Descriptive figures and three-seed latent exports may be generated
-without model or seed selection.
+chain frozen. The next one-theme task is the development-only OT ablation on
+`raw_median_ratio`:
 
-The next one-theme task is a KL-only coordinate ablation on new development
-data, comparing `raw_median_center` and `raw_median_ratio` with the completed
-`log_median_center` reference. Do not use the finalized holdout. The ablation
-must include additive/multiplicative synthetic shifts, reconstruction against
-each model-specific mean baseline, random-view stability/retrieval, technical-
-batch predictability, and shape-summary fidelity.
+```text
+forward KL
+versus
+forward KL + joint Sinkhorn divergence
+```
 
-Only after one coordinate mode and any required beta retuning are fixed should
-a separate one-theme change add joint Sinkhorn divergence as an auxiliary
-observation loss across 1D/2D/3D.
+Hold split, architecture, beta, seed matrix, random/full sampling contract, and
+all downstream evaluation rules fixed. Select `ot_blur` and `ot_weight` on
+development data only; do not use the finalized holdout. Compare base forward
+KL, Sinkhorn, exact 1D W1, quantile/tail fidelity, random-view retrieval,
+between/within separation, and input-distance/latent-distance rank
+correlation. A new independent holdout is evaluated once after all settings are
+frozen.
+
+## Fresh-VM execution policy
+
+Notebook execution must assume that every Colab/VM session starts empty. Each
+future experiment notebook therefore begins with one self-contained setup cell
+that mounts storage, clones and pins the exact Git commit, installs the repo and
+all dependencies required by the whole planned run, copies or validates input
+artifacts, and records provenance. No later cell may depend on packages or
+variables from an earlier VM session. When linear probing, UMAP, reporting, or
+a scalable OT backend is part of the planned run, their dependencies and cells
+are included from the outset. A linear probe is report-only unless its model-
+selection role is prespecified before execution.
 
 ## Deferred or out of scope
 

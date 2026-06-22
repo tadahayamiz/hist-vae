@@ -1,6 +1,6 @@
 # Claim to Evidence Map
 
-Updated: 2026-06-21
+Updated: 2026-06-22
 
 | Claim | Evidence | Status | Notes |
 |---|---|---|---|
@@ -26,5 +26,6 @@ Updated: 2026-06-21
 | Decoder conditioning causally removes technical batch effects. | E-260621-01 | rejected | Conditioning was not selected and label-batch overlap is incomplete. |
 | Probability-mass normalization alone produces a device-invariant shape representation. | R-260621-03 | rejected | It removes event abundance but retains coordinate location and width. |
 | Within the tested log-domain shape family, median centering is the preferred reference over median-plus-IQR scaling. | E-260621-03 | verified | Median centering retained width and had stronger baseline improvement, view separation, and retrieval; holdout was untouched. |
-| A raw-domain median-centered or median-ratio representation is superior for this assay. | None | open | Prespecified future ablation; no raw shape model has yet been trained. |
-| Joint Sinkhorn divergence improves reconstruction or latent geometry beyond forward KL. | None | open | Planned only after coordinate selection under R-260621-03. |
+| Under the prespecified multiplicative-gain invariance contract, `raw_median_ratio` is the selected development coordinate. | E-260622-00 | verified | Exact invariance to 0.5x, 0.75x, 1.5x, and 2.0x synthetic gains; holdout untouched. This does not prove all real device variation is multiplicative. |
+| The repo exposes a strict, differentiable joint Sinkhorn auxiliary-loss API for 1D, 2D, and 3D probability histograms. | `tests/test_optimal_transport.py`, R-260621-03 | verified | Complete joint support, strict config, autograd, artifact logging, and backend dependency checks. |
+| Joint Sinkhorn divergence improves reconstruction or latent geometry beyond forward KL on this assay. | None | open | The API is implemented; the fixed-coordinate development ablation has not yet been run. |

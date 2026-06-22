@@ -22,8 +22,10 @@ from .models import (
     validate_reconstruction_loss,
 )
 from .trainer import FineTuner, PreTrainer, validate_latent_kl_schedule
+from .optimal_transport import build_joint_bin_support, validate_ot_config
 from .data_handler import (
     DataHandler,
+    Histogram,
     validate_histogram_mode,
     validate_out_of_range_policy,
     validate_sampling_mode,
@@ -325,6 +327,7 @@ class HistVAE:
             self.config.get("condition_dim", 0)
             )
         validate_grouped_measure_contract(self.config)
+        validate_ot_config(self.config)
         validate_latent_kl_schedule(self.config)
         self.config["optimizer"] = validate_optimizer(
             self.config.get("optimizer", "radam_schedule_free")
@@ -345,6 +348,7 @@ class HistVAE:
         self.group_coordinate_normalizer = resolved_coordinate_normalizer
         self.group_coordinate_statistics = None
         self.histogram_preprocessor = resolved_preprocessor
+        self.ot_support = None
         self.model = None
         self.trainer = None
         self.optimizer = None
@@ -404,6 +408,8 @@ class HistVAE:
         self.config.update(preprocessor.config_overrides())
         self._pending_histogram_geometry = {}
         validate_grouped_measure_contract(self.config)
+        validate_ot_config(self.config)
+        self.ot_support = None
         bins_per_dim = normalize_bins(
             self.config["bins"], self.config["in_dims"]
         )
@@ -519,6 +525,7 @@ class HistVAE:
                 condition_mode
             )
         validate_grouped_measure_contract(self.config)
+        validate_ot_config(self.config)
         if train_transform is None:
             train_transform = self.config.get("transform", True)
         if test_transform is None:
@@ -710,6 +717,75 @@ class HistVAE:
             self.test_lut = self.data_handler.make_lut(dataset=self.test_dataset)
 
 
+    def _prepare_ot_support(self):
+        """Build one strict joint-bin support from the active geometry."""
+        validate_ot_config(self.config)
+        if self.config["ot_loss"] == "none":
+            self.ot_support = None
+            self.model_handler.set_ot_support(None)
+            return None
+
+        if self._pending_histogram_geometry:
+            raise ValueError(
+                "OT support cannot be built from bounds that do not match "
+                "config in_dims. Supply a fitted HistogramPreprocessor."
+            )
+        if (
+                self.group_coordinate_normalizer.mode != "none"
+                and self.histogram_preprocessor is None
+                ):
+            raise ValueError(
+                "A non-'none' group_coordinate_mode requires a fitted "
+                "HistogramPreprocessor before OT model creation."
+            )
+
+        if self.histogram_preprocessor is not None:
+            bin_edges = self.histogram_preprocessor.get_bin_edges(
+                coordinate_space="transformed"
+            )
+            geometry_source = "histogram_preprocessor"
+        else:
+            if self.config.get("max_vals") is None:
+                raise ValueError(
+                    "OT support requires configured bounds or a fitted "
+                    "HistogramPreprocessor."
+                )
+            histogram = Histogram(
+                dimension=self.config["in_dims"],
+                min_vals=self.config.get("min_vals"),
+                max_vals=self.config["max_vals"],
+                bins_per_dim=normalize_bins(
+                    self.config["bins"], self.config["in_dims"]
+                ),
+                histogram_mode=self.config["histogram_mode"],
+                out_of_range_policy=self.config["out_of_range_policy"],
+                value_transform=self.config["value_transform"],
+            )
+            bin_edges = histogram.get_bin_edges(
+                coordinate_space="transformed"
+            )
+            geometry_source = "config"
+
+        support = build_joint_bin_support(bin_edges)
+        expected_size = int(np.prod(self.config["input_shape"][1:]))
+        if support.shape != (expected_size, self.config["in_dims"]):
+            raise RuntimeError(
+                "Joint OT support does not match the configured model input: "
+                f"support={support.shape}, expected="
+                f"({expected_size}, {self.config['in_dims']})."
+            )
+        self.ot_support = support
+        self.model_handler.set_ot_support(support)
+        self.config["ot_support_metadata"] = {
+            "geometry_source": geometry_source,
+            "coordinate_space": "histogram_transformed",
+            "axis_scaling": "fitted_edge_range_to_unit_then_joint_div_sqrt_d",
+            "support_size": int(support.shape[0]),
+            "dimension": int(support.shape[1]),
+        }
+        return support
+
+
     def prep_model(self, mode="pretrain", model_path:str=None):
         """
         prepare model
@@ -727,6 +803,7 @@ class HistVAE:
         """
         # check the mode
         assert mode in ["pretrain", "cpt", "finetune"], "!! mode must be pretrain, cpt, or finetune !!"
+        self._prepare_ot_support()
         if mode == "pretrain":
             # prepare pretraining model
             self.model = self.model_handler.make_pretrain()
@@ -876,6 +953,10 @@ class HistVAE:
         means = []
         logvars = []
         groups = []
+        base_reconstruction_losses = []
+        sinkhorn_divergences = []
+        weighted_sinkhorn_divergences = []
+        observation_losses = []
         model_device = next(self.model.parameters()).device
 
         self.model.eval()
@@ -907,12 +988,29 @@ class HistVAE:
                         "Expected pretraining or fine-tuning model output."
                     )
 
+                components = self.model.observation_loss_components(
+                    reconstruction,
+                    target.to(model_device).unsqueeze(0),
+                    reduction="none",
+                )
                 targets.append(target.cpu().numpy())
                 inputs.append(model_input.cpu().numpy())
                 reconstructions.append(reconstruction.squeeze(0).cpu().numpy())
                 means.append(mean.squeeze(0).cpu().numpy())
                 logvars.append(logvar.squeeze(0).cpu().numpy())
                 groups.append(dataset.idx2group[index])
+                base_reconstruction_losses.append(
+                    float(components["base_reconstruction"].item())
+                )
+                sinkhorn_divergences.append(
+                    float(components["sinkhorn"].item())
+                )
+                weighted_sinkhorn_divergences.append(
+                    float(components["weighted_sinkhorn"].item())
+                )
+                observation_losses.append(
+                    float(components["observation"].item())
+                )
 
         return {
             "indices": np.asarray(indices, dtype=np.int64),
@@ -922,6 +1020,18 @@ class HistVAE:
             "reconstruction": np.stack(reconstructions),
             "mu": np.stack(means),
             "logvar": np.stack(logvars),
+            "base_reconstruction_loss": np.asarray(
+                base_reconstruction_losses, dtype=np.float64
+            ),
+            "sinkhorn_divergence": np.asarray(
+                sinkhorn_divergences, dtype=np.float64
+            ),
+            "weighted_sinkhorn_divergence": np.asarray(
+                weighted_sinkhorn_divergences, dtype=np.float64
+            ),
+            "observation_loss": np.asarray(
+                observation_losses, dtype=np.float64
+            ),
             "input_mode": input_mode,
         }
 

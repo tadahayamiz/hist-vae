@@ -66,6 +66,22 @@ Updated: 2026-06-22
   `HistogramPreprocessor` with pointwise transform `none`.
 - Added exact normalized-training-data replay validation for fitted histogram
   geometry and restored both preprocessing states from saved configs.
+- Completed the three-seed KL-only coordinate ablation without touching the
+  finalized holdout and selected `raw_median_ratio` under the prespecified
+  multiplicative-gain invariance contract.
+- Added a strict, dimension-independent joint Sinkhorn-divergence config/API for
+  probability-mass/simplex/forward-KL models.
+- Added joint 1D/2D/3D bin-support construction from active histogram geometry,
+  global metric scaling, strict backend validation, and a tensorized memory
+  guard.
+- Added base forward-KL, unweighted Sinkhorn, weighted Sinkhorn, and combined
+  observation-loss logging to histories, checkpoints, and reconstruction
+  exports.
+- Added the pinned `geomloss==0.3.1` dependency and the explicit
+  `ot-scalable` PyKeOps extra for online or multiscale backends.
+- Added focused OT tests covering config strictness, joint support, identity,
+  symmetry, distance ordering, autograd, 1D/2D/3D loss composition, artifact
+  logging, and strict scalable-backend dependency handling.
 
 ## Verification
 
@@ -104,6 +120,29 @@ raw_median_ratio q0.001/q0.999:      -0.41854 / 1.34531
 max abs normalized group median:     0.0 / 5.6e-17
 ```
 
+Coordinate-ablation result:
+
+```text
+selected development coordinate: raw_median_ratio
+validation groups / seeds:        20 / 3
+multiplicative factors:           0.5, 0.75, 1.5, 2.0
+shifted input W1:                 0 for every factor and seed
+shifted latent distance:          0 for every factor and seed
+self-retrieval:                   1.0 for every factor and seed
+active dimensions:                4 / 4 for every seed
+finalized holdout used:           no
+```
+
+Joint-Sinkhorn API verification:
+
+```text
+focused OT tests:                 11 passed
+related measure/preprocessor:     34 passed
+regular full pytest:              88 passed, 5 skipped
+full pytest including slow:       93 passed
+wheel build (`pip wheel --no-deps .`): passed
+```
+
 Final selected validation result:
 
 ```text
@@ -130,13 +169,14 @@ secondary probability-ensemble AUC: 0.774
 
 - Keep the finalized absolute-coordinate checkpoints frozen and finish only
   descriptive figures, tables, and three-seed `mu` exports from those artifacts.
-- Phase 2, next one theme: run the KL-only coordinate ablation on new
-  development data against
-  the completed `log_median_center` reference; include synthetic shift
-  invariance and batch-predictability diagnostics.
-- Phase 3: after fixing the coordinate and any required beta retuning, compare
-  forward KL with forward KL plus joint Sinkhorn divergence using the same
-  mathematical OT contract in 1D, 2D, and 3D.
+- Next one theme: run the development-only OT ablation on fixed
+  `raw_median_ratio`, comparing forward KL with forward KL plus the implemented
+  joint Sinkhorn divergence under the same split, architecture, beta, and
+  seeds.
+- Use a self-contained fresh-VM notebook that clones a pinned Git commit and
+  installs every dependency needed by the complete run at the start, including
+  scalable OT, linear-probe, UMAP, and reporting dependencies when those
+  analyses are planned.
 - Freeze all settings before one-time evaluation on a new independent holdout.
 
 ## Deferred
@@ -149,11 +189,6 @@ secondary probability-ensemble AUC: 0.774
   disease-specific latent
 - Prior-calibration and unconditional-generation evaluation
 - CLI repair or redesign
-
-## Documentation-only refresh
-
-The 2026-06-21 shape-coordinate/OT planning update changed Markdown files only.
-No source code or tests were changed, so pytest was not run for this refresh.
 
 ## Temporary shims
 

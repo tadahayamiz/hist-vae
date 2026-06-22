@@ -18,7 +18,9 @@ dependencies = [
   "matplotlib",
   "tqdm",
   "schedulefree",
+  "geomloss==0.3.1",
 ]
+
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -28,6 +30,11 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 license = { file = "LICENSE" }
+
+[project.optional-dependencies]
+ot-scalable = [
+  "pykeops>=2.2,<3",
+]
 
 [project.urls]
 Homepage = "https://github.com/mizuno-group/hist-vae"
