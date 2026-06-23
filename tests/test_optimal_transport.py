@@ -70,6 +70,48 @@ def test_joint_sinkhorn_identity_symmetry_and_distance_order():
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize("spatial_shape", [(5,), (3, 4)])
+def test_joint_sinkhorn_pairwise_matches_aligned_forward(spatial_shape):
+    edges = [np.linspace(0.0, 1.0, bins + 1) for bins in spatial_shape]
+    metric = JointSinkhornDivergence(
+        support=build_joint_bin_support(edges),
+        p=1,
+        blur=0.05,
+        scaling=0.8,
+        backend="tensorized",
+    )
+
+    query = torch.rand(3, 1, *spatial_shape)
+    query = query / query.flatten(start_dim=1).sum(dim=1).view(
+        3, *([1] * (len(spatial_shape) + 1))
+    )
+    reference = torch.rand(2, 1, *spatial_shape)
+    reference = reference / reference.flatten(start_dim=1).sum(dim=1).view(
+        2, *([1] * (len(spatial_shape) + 1))
+    )
+
+    pairwise = metric.pairwise(query, reference, pair_batch_size=2)
+
+    assert pairwise.shape == (3, 2)
+    for query_index in range(3):
+        for reference_index in range(2):
+            aligned = metric(
+                query[query_index:query_index + 1],
+                reference[reference_index:reference_index + 1],
+                reduction="none",
+            )
+            torch.testing.assert_close(
+                pairwise[query_index, reference_index],
+                aligned[0],
+                rtol=1e-5,
+                atol=1e-6,
+            )
+
+    with pytest.raises(ValueError, match="pair_batch_size"):
+        metric.pairwise(query, reference, pair_batch_size=0)
+
+
+@pytest.mark.smoke
 def test_joint_sinkhorn_is_differentiable_with_respect_to_prediction_mass():
     support = build_joint_bin_support([np.linspace(0.0, 1.0, 9)])
     metric = JointSinkhornDivergence(

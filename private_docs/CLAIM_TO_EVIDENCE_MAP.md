@@ -1,6 +1,6 @@
 # Claim to Evidence Map
 
-Updated: 2026-06-22
+Updated: 2026-06-23
 
 | Claim | Evidence | Status | Notes |
 |---|---|---|---|
@@ -18,7 +18,7 @@ Updated: 2026-06-22
 | Decoder-only technical conditioning should not be used in the frozen absolute-coordinate benchmark. | E-260621-01 | verified | It used the condition but did not consistently improve reconstruction or geometry and did not reduce batch signal. |
 | The frozen absolute-coordinate benchmark generalizes beyond the train-mean distribution to its finalized holdout. | E-260621-02 | verified | Mean holdout forward KL `0.006251` versus baseline `0.051049`; 20/20 groups beat baseline for every seed. |
 | The frozen absolute-coordinate latent is stable to finite-event subsampling. | E-260621-00, E-260621-02 | verified | Holdout retrieval `0.829 +/- 0.027` versus chance `0.05`; between/within ratio `5.146 +/- 0.502`. |
-| The frozen absolute-coordinate latent preserves much of its original one-dimensional log1p distribution geometry. | E-260621-00, E-260621-02 | verified | Holdout W1-latent Spearman `0.882 +/- 0.053`; this is not evidence of device-shift invariance. |
+| The frozen absolute-coordinate latent preserves much of its original one-dimensional `log1p` distribution geometry. | E-260621-00, E-260621-02 | verified | Holdout W1-latent Spearman `0.882 +/- 0.053`; this is not evidence of device-shift invariance. |
 | The frozen absolute-coordinate benchmark avoids posterior collapse for the current data. | E-260621-00, E-260621-02 | verified | All four train and holdout dimensions active for every seed. |
 | The frozen absolute-coordinate latent contains exploratory disease-related information. | E-260621-02 | tentative | Fixed holdout probe AUC `0.734 +/- 0.054`; probability ensemble AUC `0.774`; only six PC holdout samples. |
 | The model provides a clinically validated cancer classifier. | None | rejected | The probe is exploratory, the sample is small, and no diagnostic validation was performed. |
@@ -26,6 +26,19 @@ Updated: 2026-06-22
 | Decoder conditioning causally removes technical batch effects. | E-260621-01 | rejected | Conditioning was not selected and label-batch overlap is incomplete. |
 | Probability-mass normalization alone produces a device-invariant shape representation. | R-260621-03 | rejected | It removes event abundance but retains coordinate location and width. |
 | Within the tested log-domain shape family, median centering is the preferred reference over median-plus-IQR scaling. | E-260621-03 | verified | Median centering retained width and had stronger baseline improvement, view separation, and retrieval; holdout was untouched. |
-| Under the prespecified multiplicative-gain invariance contract, `raw_median_ratio` is the selected development coordinate. | E-260622-00 | verified | Exact invariance to 0.5x, 0.75x, 1.5x, and 2.0x synthetic gains; holdout untouched. This does not prove all real device variation is multiplicative. |
+| Under the prespecified multiplicative-gain invariance contract, `raw_median_ratio` is the selected development coordinate. | E-260622-00 | verified | Exact invariance to 0.5x, 0.75x, 1.5x, and 2.0x synthetic gains. This does not prove all real device variation is multiplicative. |
 | The repo exposes a strict, differentiable joint Sinkhorn auxiliary-loss API for 1D, 2D, and 3D probability histograms. | `tests/test_optimal_transport.py`, R-260621-03 | verified | Complete joint support, strict config, autograd, artifact logging, and backend dependency checks. |
-| Joint Sinkhorn divergence improves reconstruction or latent geometry beyond forward KL on this assay. | None | open | The API is implemented; the fixed-coordinate development ablation has not yet been run. |
+| Weak joint Sinkhorn improves geometric reconstruction on fixed `raw_median_ratio` data with little loss of forward-KL fidelity. | E-260623-00 | verified | At factor `0.1`, forward KL worsened `0.87%`, Sinkhorn improved `15.8%`, exact W1 improved `5.7%`, and retrieval increased `1.25` points across three seeds. |
+| `ot_factor=0.1` is the selected OT strength for the current development mainline. | E-260623-00, R-260623-00 | verified | Actual config value is `ot_weight=6.7578684799473425` after `lambda_equal=67.57868479947342` calibration. |
+| Stronger OT weighting is better for this assay. | E-260623-00 | rejected | Factors `0.3` and `1.0` improved some geometry metrics but failed the predefined forward-KL gate and reduced separation/retrieval. |
+| OT directly forces latent Euclidean distance to equal input Wasserstein distance. | R-260623-00 | rejected | The auxiliary acts on input versus reconstruction; W1-latent correlation is an evaluation metric, not the optimized equality. |
+| The selected four-dimensional shape-plus-OT representation avoids collapse on the development split. | E-260623-00 | verified | All four dimensions were active for every seed and every tested OT factor. |
+| Eight latent dimensions are needed for the current data. | None | unsupported | Four dimensions already reconstruct well and remain fully active; 8D is optional sensitivity analysis only. |
+| The selected shape-plus-OT latent separates Healthy and Cancer or supports diagnosis. | E-260623-00 | unsupported | The report-only development linear probe was near chance and was excluded from selection. PCA/UMAP color separation would be descriptive only. |
+| The legacy 20-group holdout is an independent confirmatory set for the selected shape-plus-OT model. | E-260621-02 | rejected | It was already used to finalize the older absolute-coordinate benchmark. A new independent cohort is required. |
+| The frozen seed-73 shape-plus-OT model supports global Healthy-versus-PDAC separation in its four-dimensional latent. | E-260623-01 | unsupported | Train OOF and validation readouts were near chance; the opened holdout result was inconsistent and small. |
+| A minority of samples is repeatedly far from the train-Healthy shape and latent reference under fixed 1,024-event resampling. | E-260623-01 | tentative | Robust novelty occurred in Healthy 4/96 and PDAC 5/38 overall; opened/descriptive and not cross-fitted. |
+| Robust Healthy-reference anomalies are enriched in PDAC in a confirmatory sense. | E-260623-01 | unsupported | The descriptive rates are higher in PDAC, but sample counts are small, the holdout is opened, and technical/event-count effects remain unresolved. |
+| The repo can aggregate repeated sampled-view posterior means and compute generic leave-one-out reference kNN scores without diagnosis-specific model code. | `tests/test_multiview_reference.py`, R-260623-01 | verified | Inference-only API tested in 1D and 2D; reference utilities are representation-agnostic. |
+| The repo can compute all query-reference joint Sinkhorn distances for 1D, 2D, and 3D-compatible joint supports. | `tests/test_optimal_transport.py`, R-260623-01 | verified | Batched pairwise values match aligned forward evaluations; current focused test covers 1D and 2D in addition to existing 1D/2D/3D support tests. |
+| Multi-view latent aggregation adds useful stability or organization beyond direct joint-Sinkhorn shape distance. | R-260623-01 | open | This is the next frozen-model comparison and must be established before adding a new training loss. |

@@ -25,3 +25,10 @@ from .optimal_transport import (
     build_joint_bin_support,
     validate_ot_config,
 )
+
+from .reference import (
+    aggregate_latent_views,
+    empirical_reference_percentile,
+    euclidean_reference_knn,
+    reference_knn_from_distances,
+)

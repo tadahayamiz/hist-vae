@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import os, yaml
 from datetime import datetime
+from numbers import Integral
 
 from .models import (
     ModelHandler,
@@ -43,6 +44,7 @@ from .preprocessing import (
     validate_group_coordinate_mode,
 )
 from .utils import fix_seed
+from .reference import aggregate_latent_views
 from .visualization import (
     plot_hist as plot_histogram_grid,
     plot_reconstruction as plot_reconstruction_grid,
@@ -898,6 +900,134 @@ class HistVAE:
                 # note both ConvVAE and LinearHead have encode method
                 reps.append(mu.cpu().numpy().reshape(1, -1))  # del batch dimension
         return np.vstack(reps)
+
+
+    def get_multiview_latent(
+            self, dataset=None, indices=None, num_views=30, random_seed=0,
+            return_histograms=False
+            ):
+        """Encode repeated unaugmented point-subsample views per group.
+
+        This is an inference-only resampling utility. It repeatedly calls the
+        dataset's fixed ``num_points`` histogram sampler and records the VAE
+        posterior parameters. It does not sample from the latent posterior,
+        add a consistency loss, retrain the model, or assume a particular
+        histogram dimensionality.
+
+        Parameters
+        ----------
+        dataset : PointHistDataset, optional
+            Prepared grouped dataset. The test dataset is used by default,
+            falling back to the train dataset.
+        indices : sequence of int, optional
+            Dataset indices. All groups are used when omitted.
+        num_views : int
+            Number of independent point-subsample histograms per group.
+        random_seed : int
+            Non-negative root seed. Each ``(dataset index, view index)`` pair
+            receives a deterministic child generator, so results do not depend
+            on the order of ``indices``.
+        return_histograms : bool
+            When true, include sampled histogram views in the returned dict.
+
+        Returns
+        -------
+        dict
+            Sample indices and groups; ``mu`` and ``logvar`` arrays with shape
+            ``(n_samples, num_views, latent_dim)``; posterior SD; the mean and
+            SD of posterior means across views; and RMS distance of the views
+            from their sample-level mean. ``histogram`` is included only when
+            ``return_histograms=True`` and has shape
+            ``(n_samples, num_views, in_channels, *bins)``.
+        """
+        if self.model is None:
+            raise ValueError("!! fit or load_model first !!")
+        if dataset is None:
+            dataset = (
+                self.test_dataset
+                if self.test_dataset is not None
+                else self.train_dataset
+            )
+        if dataset is None:
+            raise ValueError("A prepared dataset is required.")
+
+        if indices is None:
+            indices = list(range(len(dataset)))
+        else:
+            indices = [int(index) for index in indices]
+        if not indices:
+            raise ValueError("indices must contain at least one dataset index.")
+        if any(index < 0 or index >= len(dataset) for index in indices):
+            raise IndexError("indices contains an out-of-range dataset index.")
+
+        if isinstance(num_views, bool) or not isinstance(num_views, Integral):
+            raise ValueError("num_views must be a positive integer.")
+        num_views = int(num_views)
+        if num_views <= 0:
+            raise ValueError("num_views must be a positive integer.")
+
+        if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+            raise ValueError("random_seed must be a non-negative integer.")
+        random_seed = int(random_seed)
+        if random_seed < 0:
+            raise ValueError("random_seed must be a non-negative integer.")
+
+        if not isinstance(return_histograms, bool):
+            raise ValueError("return_histograms must be a boolean.")
+
+        means = []
+        logvars = []
+        histogram_views = []
+        groups = []
+        model_device = next(self.model.parameters()).device
+
+        self.model.eval()
+        with torch.inference_mode():
+            for index in indices:
+                sample_means = []
+                sample_logvars = []
+                sample_histograms = []
+                for view_index in range(num_views):
+                    child_seed = np.random.SeedSequence(
+                        entropy=random_seed,
+                        spawn_key=(int(index), int(view_index)),
+                    )
+                    rng = np.random.default_rng(child_seed)
+                    histogram = dataset.get_sampled_histogram(index, rng=rng)
+                    mean, logvar = self.model.encode(
+                        histogram.to(model_device).unsqueeze(0)
+                    )
+                    sample_means.append(mean.squeeze(0).cpu().numpy())
+                    sample_logvars.append(logvar.squeeze(0).cpu().numpy())
+                    if return_histograms:
+                        sample_histograms.append(histogram.cpu().numpy())
+
+                means.append(np.stack(sample_means))
+                logvars.append(np.stack(sample_logvars))
+                if return_histograms:
+                    histogram_views.append(np.stack(sample_histograms))
+                groups.append(dataset.idx2group[index])
+
+        mu = np.stack(means)
+        logvar = np.stack(logvars)
+        summary = aggregate_latent_views(mu)
+        result = {
+            "indices": np.asarray(indices, dtype=np.int64),
+            "groups": np.asarray(groups),
+            "mu": mu,
+            "logvar": logvar,
+            "posterior_sd": np.exp(0.5 * logvar),
+            "mu_mean": summary["mean"],
+            "mu_sd": summary["sd"],
+            "mu_rms_distance_to_mean": summary[
+                "rms_distance_to_mean"
+            ],
+            "num_views": num_views,
+            "random_seed": random_seed,
+        }
+        if return_histograms:
+            result["histogram"] = np.stack(histogram_views)
+        return result
 
 
     def get_reconstruction(

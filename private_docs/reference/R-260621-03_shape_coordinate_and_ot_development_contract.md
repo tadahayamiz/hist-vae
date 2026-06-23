@@ -1,7 +1,10 @@
 # R-260621-03: Shape-oriented raw-coordinate and OT development contract
 
-Status: active
-Updated: 2026-06-22
+Status: superseded
+Updated: 2026-06-23
+
+> Superseded by R-260623-00 after completion of the OT ablation. This record is
+> retained as the development contract and implementation rationale.
 
 ## 1. Decision
 
@@ -257,14 +260,15 @@ Phase 1: strict group-coordinate normalization                         [complete
 Phase 2: KL-only coordinate ablation                                   [complete]
 Phase 3: fix raw_median_ratio under multiplicative-gain contract       [complete]
 Phase 4a: strict joint Sinkhorn config/API and tests                    [complete]
-Phase 4b: development-only KL versus KL + Sinkhorn ablation            [next]
-Phase 5: freeze all choices and evaluate a new independent holdout once
+Phase 4b: development-only KL versus KL + Sinkhorn ablation            [complete]
+Phase 5: freeze all choices and evaluate a new independent holdout once [next]
 ```
 
-The next execution notebook must assume a fresh VM: clone and pin one Git
-commit, install the complete planned dependency stack in the setup cell, and
-include reporting analyses such as linear probing and UMAP from the outset when
-they are part of the run. No cell may rely on state from a previous VM session.
+Future execution notebooks must assume a fresh VM: clone the named
+`dev-2026` branch, record its resolved HEAD, install the complete planned
+dependency stack in the setup cell, and include reporting analyses such as
+linear probing and UMAP from the outset when they are part of the run. No cell
+may rely on state from a previous VM session.
 
 ## 8. Claim boundary
 
@@ -275,7 +279,8 @@ synthetic multiplicative-gain contract and supports its use as the development
 mainline under that assumption. It does not prove that real device variation is
 purely multiplicative or that this coordinate is universally superior.
 
-The repository now verifies that joint Sinkhorn is implemented, strict,
-differentiable, and artifact-traceable in 1D/2D/3D. No evidence yet shows that
-adding it improves reconstruction or latent geometry on the assay; that claim
-remains open until Phase 4b is completed.
+The repository verifies that joint Sinkhorn is implemented, strict,
+differentiable, and artifact-traceable in 1D/2D/3D. E-260623-00 completed
+Phase 4b and selected weak OT (`ot_factor=0.1`,
+`ot_weight=6.7578684799473425`) because it improved Sinkhorn and exact W1 with
+minimal forward-KL cost. R-260623-00 is the current mainline reference.

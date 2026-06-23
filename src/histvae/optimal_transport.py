@@ -308,6 +308,69 @@ class JointSinkhornDivergence(nn.Module):
             )
         return result.clamp_min(0)
 
+    def pairwise(self, query, reference, pair_batch_size=64):
+        """Return all query-reference Sinkhorn divergences.
+
+        Parameters
+        ----------
+        query, reference : torch.Tensor
+            Probability-mass histograms with leading sample dimensions. The
+            remaining histogram dimensions may describe one-, two-, or
+            three-dimensional joint histograms, but their flattened bin count
+            must match this instance's support.
+        pair_batch_size : int
+            Maximum number of query-reference pairs evaluated in one call to
+            the underlying Sinkhorn loss. This limits temporary memory without
+            changing the returned distance matrix.
+
+        Returns
+        -------
+        torch.Tensor
+            Matrix with shape ``(n_query, n_reference)``.
+        """
+        if isinstance(pair_batch_size, bool) or not isinstance(
+                pair_batch_size, Integral
+                ):
+            raise ValueError("pair_batch_size must be a positive integer.")
+        pair_batch_size = int(pair_batch_size)
+        if pair_batch_size <= 0:
+            raise ValueError("pair_batch_size must be a positive integer.")
+
+        query_weights = self._validate_and_prepare_weights(query, "query")
+        reference_weights = self._validate_and_prepare_weights(
+            reference, "reference"
+        )
+        if query_weights.device != reference_weights.device:
+            raise ValueError("query and reference must be on the same device.")
+        if query_weights.dtype != reference_weights.dtype:
+            raise ValueError("query and reference must use the same dtype.")
+
+        n_query = int(query_weights.shape[0])
+        n_reference = int(reference_weights.shape[0])
+        if n_query == 0 or n_reference == 0:
+            raise ValueError("query and reference batches must be non-empty.")
+
+        flat_result = torch.empty(
+            n_query * n_reference,
+            dtype=query_weights.dtype,
+            device=query_weights.device,
+        )
+        for start in range(0, flat_result.numel(), pair_batch_size):
+            stop = min(start + pair_batch_size, flat_result.numel())
+            flat_indices = torch.arange(
+                start, stop, device=query_weights.device
+            )
+            query_indices = torch.div(
+                flat_indices, n_reference, rounding_mode="floor"
+            )
+            reference_indices = torch.remainder(flat_indices, n_reference)
+            flat_result[start:stop] = self._per_sample(
+                query_weights[query_indices],
+                reference_weights[reference_indices],
+            )
+
+        return flat_result.reshape(n_query, n_reference)
+
     def forward(self, target, prediction, reduction="mean"):
         """Compute joint Sinkhorn divergence for one batch of histograms."""
         if target.shape != prediction.shape:

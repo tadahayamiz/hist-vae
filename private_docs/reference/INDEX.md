@@ -9,4 +9,6 @@
 | R-260621-00 | Frozen absolute-coordinate grouped-measure benchmark | active |
 | R-260621-01 | Raw-space histogram and reconstruction visualization contract | active |
 | R-260621-02 | Train-fitted histogram preprocessing contract | active |
-| R-260621-03 | Shape-oriented raw-coordinate and OT development contract | active |
+| R-260621-03 | Shape-oriented raw-coordinate and OT development contract | superseded |
+| R-260623-00 | Selected raw-median-ratio plus weak-joint-Sinkhorn mainline | active |
+| R-260623-01 | Multi-view latent aggregation and reference scoring | active |

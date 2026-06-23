@@ -12,3 +12,5 @@
 | E-260621-02 | Finalized absolute-coordinate holdout evaluation | finalized |
 | E-260621-03 | Log-domain shape-normalization pilot | complete |
 | E-260622-00 | KL-only raw shape-coordinate ablation | complete |
+| E-260623-00 | Joint-Sinkhorn weight ablation on fixed raw-median-ratio geometry | complete |
+| E-260623-01 | Healthy-reference anomaly pilot on the frozen seed-73 model | complete, exploratory |

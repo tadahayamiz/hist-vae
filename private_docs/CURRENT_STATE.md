@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-06-22
+Updated: 2026-06-23
 
 ## Repository identity
 
@@ -15,24 +15,33 @@ The finalized FITC model remains a frozen absolute-coordinate `log1p`
 probability-mass benchmark. It is stable under finite-event subsampling but is
 not a device-invariant shape-only model.
 
-The active development mainline is now `raw_median_ratio`, selected in the
-holdout-free coordinate ablation E-260622-00 under the prespecified assumption
-that instrument intensity variation is primarily a positive multiplicative
-gain. The coordinate is
+A separate holdout-free development cycle has now fixed the shape-oriented
+mainline as:
+
+```text
+raw_median_ratio
++ probability-mass histogram
++ forward KL
++ weak joint Sinkhorn auxiliary loss
+```
+
+For group `s`, the coordinate is
 
 ```text
 u_si = x_si / median_group(x_s) - 1
 ```
 
-and therefore retains relative width, skewness, multimodality, and relative
-tails while removing group-level gain. `log_median_center` remains the
-sensitivity reference. Total event abundance and the removed raw median remain
-separate sample metadata rather than implicit components of the shape latent.
+which is exactly invariant to positive multiplicative gain. It retains relative
+width, skewness, multimodality, and relative tails. Total event abundance and
+the removed raw median remain separate sample metadata rather than implicit
+components of the shape latent.
 
-The next empirical question is whether adding joint observation-space
-Sinkhorn divergence to forward KL improves geometric reconstruction or latent
-quality. The strict reusable OT config/API is implemented; its benefit has not
-yet been established by the ablation.
+The OT ablation is complete. The selected relative OT strength is
+`ot_factor=0.1`, corresponding to the actual config value
+`ot_weight=6.7578684799473425` after scale calibration. This weak auxiliary
+term improved validation Sinkhorn divergence and exact 1D W1 while preserving
+forward-KL fidelity, random-view retrieval, between/within separation, and all
+four active latent dimensions.
 
 ## Sample contract
 
@@ -43,14 +52,14 @@ yet been established by the ablation.
 - `slice` remains QC or future block-resampling metadata; it is not a separate
   latent level in the selected model.
 
-## Frozen absolute-coordinate benchmark
+## Selected shape-plus-OT development mainline
 
 ```yaml
+group_coordinate_mode: raw_median_ratio
+
 histogram_mode: probability_mass
-value_transform: log1p
-group_coordinate_mode: none
+value_transform: none
 out_of_range_policy: clip
-max_vals: [100000.0]
 bins: 64
 
 train_sampling_mode: random
@@ -67,6 +76,14 @@ dropout_conv: 0.0
 decoder_output_mode: simplex_softmax
 reconstruction_loss: forward_kl
 
+ot_loss: sinkhorn
+ot_weight: 6.7578684799473425
+ot_p: 1
+ot_blur: 0.05
+ot_scaling: 0.8
+ot_backend: tensorized
+ot_mass_epsilon: 0.0
+
 beta: 0.0001
 latent_kl_schedule: linear_warmup
 latent_kl_warmup_epochs: 25
@@ -80,64 +97,72 @@ condition_mode: none
 condition_dim: 0
 ```
 
-The epoch count is a ceiling. The selected three seeds stopped between epochs
-110 and 186 after patience-based early stopping.
+The scientific relative-strength setting is `ot_factor=0.1`. The repository
+accepts the calibrated loss coefficient as `ot_weight`; therefore
+`ot_weight=0.1` is not equivalent to the selected experiment.
 
-Legacy `count` and `density` paths remain available with sigmoid/MSE. Optional
-decoder-only numeric conditioning remains implemented but was not selected for
-the current dataset.
+The formal sample representation is the full four-dimensional posterior mean
+`mu` from the deterministic full-group histogram. Active-dimension counting is
+a collapse diagnostic only; dimensions are not dropped from the exported
+matrix or standard downstream analyses.
 
-## Active development direction
+## OT-weight calibration and ablation result
 
-The KL-only coordinate ablation is complete:
+The KL-only references were retrained on the same branch snapshot as the OT
+models. For each seed,
 
 ```text
-main:                    raw_median_ratio
-sensitivity reference:   log_median_center
-additive-shift reference: raw_median_center
-IQR scaling:              sensitivity analysis only
+lambda_equal_seed
+  = median_train_forward_KL / median_train_Sinkhorn
 ```
 
-`raw_median_ratio` was exactly invariant to all prespecified 0.5x, 0.75x,
-1.5x, and 2.0x synthetic gains after each validation group was renormalized:
-input W1 and latent shift were zero and self-retrieval remained one for every
-seed. This is a mathematical contract check, not proof that all real device
-variation is purely multiplicative.
+was computed. The three values were `66.221982`, `73.841289`, and `67.578685`;
+the median was:
 
-The strict reusable `GroupCoordinateNormalizer` remains upstream of the
-train-fitted `HistogramPreprocessor`. Non-`none` coordinate modes require
-pointwise histogram transform `none`, and global histogram geometry is fitted
-on normalized training groups only.
-
-The repository now exposes a strict joint-Sinkhorn observation-loss API:
-
-```yaml
-reconstruction_loss: forward_kl
-ot_loss: sinkhorn
-ot_weight: <positive lambda>
-ot_p: 1
-ot_blur: 0.05
-ot_scaling: 0.8
-ot_backend: tensorized  # online/multiscale require the ot-scalable extra
-ot_mass_epsilon: 0.0
+```text
+lambda_equal = 67.57868479947342
 ```
 
-The implemented observation term is
-`forward KL + ot_weight * joint Sinkhorn divergence`. Joint bin centers are
-constructed from the active train-fitted histogram geometry, each axis is
-scaled globally for the ground metric, and the complete 1D/2D/3D joint support
-is transported. Axis-wise marginal OT is not used. Training history,
-checkpoints, and reconstruction exports report base KL, unweighted Sinkhorn,
-weighted Sinkhorn, and their combined observation loss separately.
+The tested weights were `ot_factor * lambda_equal`:
 
-## Final evidence status
+```text
+0.1 ->  6.7578684799473425
+0.3 -> 20.273605439842026
+1.0 -> 67.57868479947342
+```
 
-The beta and condition mode of the frozen absolute-coordinate benchmark were
-selected using train/validation data only. Its holdout was then evaluated once
-with all three fixed seeds and finalized. These results apply to that coordinate
-contract and do not establish invariance to device intensity shifts.
+Three-seed development means were:
 
-Across the 20 holdout groups:
+| Loss | OT factor | Forward KL | Sinkhorn | Exact W1 | Between/within | Retrieval | W1-latent | Active |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| KL only | 0.0 | 0.013313 | 0.000358 | 0.004534 | 4.179 | 0.766 | 0.521 | 4/4 |
+| KL + Sinkhorn | **0.1** | **0.013428** | **0.000302** | **0.004274** | **4.189** | **0.778** | **0.521** | **4/4** |
+| KL + Sinkhorn | 0.3 | 0.015623 | 0.000312 | 0.004298 | 3.803 | 0.751 | 0.561 | 4/4 |
+| KL + Sinkhorn | 1.0 | 0.017357 | 0.000289 | 0.004236 | 3.530 | 0.731 | 0.649 | 4/4 |
+
+`ot_factor=0.1` increased forward KL by only `0.87%`, reduced Sinkhorn by
+`15.8%`, reduced exact W1 by `5.7%`, and increased retrieval by `1.25`
+percentage points. Factors `0.3` and `1.0` failed the prespecified forward-KL
+gate and were rejected. The linear probe remained report-only and near chance;
+it was not used to select the OT weight.
+
+## Single-checkpoint reporting choice
+
+Scientific conclusions remain based on the three-seed summary. For a single
+collaborator-facing deterministic export, use:
+
+```text
+raw_median_ratio_kl_sinkhorn_f0p10_seed73
+```
+
+because it had the lowest validation combined observation loss within the
+already selected `ot_factor=0.1` setting. This is an artifact-selection rule,
+not evidence that seed 73 is a distinct scientific model class.
+
+## Frozen absolute-coordinate benchmark
+
+The earlier absolute-coordinate `log1p(FITC_Sum)` benchmark remains frozen with
+its own finalized evidence chain. Across its 20 holdout groups:
 
 ```text
 mean full-group forward KL:           0.006251 +/- 0.001777
@@ -150,27 +175,62 @@ random-view retrieval accuracy:       0.829 +/- 0.027
 input-W1 / latent-distance Spearman:  0.882 +/- 0.053
 ```
 
-The frozen benchmark therefore passes the intended sample-representation gate:
-it reconstructs unseen sample distributions, remains stable under finite-event
-subsampling, and preserves much of the input-distribution geometry.
+Those results apply only to the frozen absolute-coordinate contract and do not
+establish device-shift invariance or validate the new shape-plus-OT mainline.
+The disease-label probe from that benchmark remains exploratory, not clinical
+validation.
 
-The fixed disease-label probe produced mean ROC AUC `0.734 +/- 0.054`; the
-secondary three-seed probability average produced AUC `0.774`. This is
-exploratory evidence of weak disease-related information, not diagnostic
-validation. The overall C and PC distributions are visually similar, and only
-a subset of PC samples may contain a specific component.
+## Evidence and holdout boundary
+
+The coordinate and OT ablations used `94` training and `20` validation groups
+with seeds `17`, `42`, and `73`. The legacy 20-group holdout was not accessed
+for either ablation. However, that group set was already used to finalize the
+older absolute-coordinate benchmark and therefore is not a new independent
+holdout for the shape-plus-OT development cycle.
+
+It may be exported descriptively together with all samples only if the artifact
+manifest explicitly records that it has been opened for this model. It must not
+then be used for further hyperparameter, threshold, architecture, or checkpoint
+selection. A genuinely new independent cohort is required for confirmatory
+evaluation of the selected shape-plus-OT model.
 
 ## Model interpretation
 
-The frozen benchmark is non-collapsed and suitable for deterministic sample
-representation via full-group posterior mean `mu`. Because the selected beta
-is small, posterior standard deviations are narrow, and latent KL remains
-substantial, it is best described as a weakly VAE-regularized denoising
-distributional autoencoder.
+The selected model is a weakly VAE-regularized denoising distributional
+autoencoder with a geometry-aware observation auxiliary. Forward KL preserves
+probability-mass fidelity; joint Sinkhorn adds a distance-aware penalty on the
+complete 1D/2D/3D joint histogram support. This is observation-space OT, not a
+Wasserstein autoencoder prior-matching objective.
 
-The current evidence does not establish calibrated posterior uncertainty,
-realistic unconditional generation from the standard-normal prior, causal
-batch correction, or clinical diagnostic performance.
+The current evidence supports deterministic sample representation and improved
+geometric reconstruction under the tested development split. It does not
+establish calibrated posterior uncertainty, realistic unconditional generation,
+causal batch correction, biological mechanism, or clinical diagnostic
+performance.
+
+## Exploratory Healthy-reference anomaly evidence
+
+The collaborator export and fixed follow-up analysis are complete for the
+selected seed-73 checkpoint. Healthy and PDAC mean shapes overlap strongly, and
+the four-dimensional latent does not provide stable global Healthy-versus-PDAC
+separation. The exploratory 30-view anomaly pilot instead supports a
+minority-anomaly hypothesis:
+
+```text
+all samples:                 Healthy 4/96, PDAC 5/38 robust novelty
+validation + opened holdout: Healthy 2/28, PDAC 2/12 robust novelty
+```
+
+This enrichment is descriptive. The current encoder was trained on all
+diagnoses, the normal reference was not cross-fitted, and the legacy holdout is
+opened. Out-of-sample PDAC candidates also had high reconstruction misfit, so
+technical and finite-event effects remain unresolved. See E-260623-01.
+
+The immediate methodological question is whether the existing latent adds
+sampling stability or organization beyond direct histogram distance. The
+minimal next contract therefore leaves the model frozen, aggregates repeated
+posterior means per sample, and compares Healthy-reference latent kNN distance
+with joint nD Sinkhorn kNN distance. See R-260623-01.
 
 ## Active references
 
@@ -180,7 +240,11 @@ batch correction, or clinical diagnostic performance.
 - `R-260621-00`: frozen absolute-coordinate grouped-measure benchmark
 - `R-260621-01`: raw-space histogram and reconstruction visualization
 - `R-260621-02`: train-fitted histogram preprocessing
-- `R-260621-03`: shape-oriented raw-coordinate and joint-OT development contract
+- `R-260623-00`: selected raw-median-ratio plus weak-joint-Sinkhorn mainline
+- `R-260623-01`: multi-view latent aggregation and reference scoring
+
+`R-260621-03` is retained as the superseded development contract that led to
+the selected mainline.
 
 ## Active evidence
 
@@ -192,46 +256,50 @@ batch correction, or clinical diagnostic performance.
 - `E-260621-00`: multi-seed beta convergence and selection
 - `E-260621-01`: decoder-conditioning ablation
 - `E-260621-02`: finalized absolute-coordinate holdout evaluation
-- `E-260621-03`: log-domain shape-normalization pilot; holdout untouched
-- `E-260622-00`: KL-only raw shape-coordinate ablation; holdout untouched
+- `E-260621-03`: log-domain shape-normalization pilot
+- `E-260622-00`: KL-only raw shape-coordinate ablation
+- `E-260623-00`: joint-Sinkhorn weight ablation on fixed `raw_median_ratio`
+- `E-260623-01`: Healthy-reference anomaly pilot on the frozen seed-73 model
 
 ## Next action
 
-Keep the finalized absolute-coordinate checkpoints and their reporting artifact
-chain frozen. The next one-theme task is the development-only OT ablation on
-`raw_median_ratio`:
+The next one-theme task is a frozen-model, dimension-general comparison:
 
 ```text
-forward KL
-versus
-forward KL + joint Sinkhorn divergence
+30 deterministic point-subsample views per sample
+-> posterior mean for every view
+-> sample position = mean posterior mu across views
+-> sampling instability = view SD / RMS displacement
+-> train-Healthy latent mean-kNN score
+-> train-Healthy joint-Sinkhorn mean-kNN score on the mean sampled histogram
+-> compare score concordance, candidate overlap, and view stability
 ```
 
-Hold split, architecture, beta, seed matrix, random/full sampling contract, and
-all downstream evaluation rules fixed. Select `ot_blur` and `ot_weight` on
-development data only; do not use the finalized holdout. Compare base forward
-KL, Sinkhorn, exact 1D W1, quantile/tail fidelity, random-view retrieval,
-between/within separation, and input-distance/latent-distance rank
-correlation. A new independent holdout is evaluated once after all settings are
-frozen.
+No training loss, architecture, coordinate, OT weight, checkpoint, or diagnosis
+head is changed. The same direct-shape path uses the existing full joint support
+and applies to 1D, 2D, and 3D probability histograms.
+
+The fixed exploratory thresholds remain shape percentile 0.95, latent
+percentile 0.90, and latent-view exceedance rate 0.80. They must not be retuned
+from PDAC identities or the opened holdout. If the latent does not improve
+stability or organization over direct Sinkhorn distance, retain the direct
+metric and do not introduce metric-learning or view-consistency losses.
 
 ## Fresh-VM execution policy
 
-Notebook execution must assume that every Colab/VM session starts empty. Each
-future experiment notebook therefore begins with one self-contained setup cell
-that mounts storage, clones and pins the exact Git commit, installs the repo and
-all dependencies required by the whole planned run, copies or validates input
-artifacts, and records provenance. No later cell may depend on packages or
-variables from an earlier VM session. When linear probing, UMAP, reporting, or
-a scalable OT backend is part of the planned run, their dependencies and cells
-are included from the outset. A linear probe is report-only unless its model-
-selection role is prespecified before execution.
+Assume every Colab/VM session starts empty. Each experiment or export notebook
+begins with one self-contained setup cell that mounts storage, clones the named
+`dev-2026` branch, records its resolved HEAD, installs the repo and the complete
+planned dependency stack, validates input artifacts, and records provenance.
+The user does not need to specify a commit manually. Later cells must not depend
+on state from an earlier VM session.
 
 ## Deferred or out of scope
 
 - Optional total mass or exposure-normalized event-rate branch
 - Tail-sensitive or cancer-specific rare-event representation
 - Median-plus-IQR normalization as a mainline rather than sensitivity analysis
+- Eight-dimensional latent sensitivity analysis
 - Point-coordinate measurement-noise augmentation
 - Adversarial batch removal
 - Prior-calibrated unconditional generation
